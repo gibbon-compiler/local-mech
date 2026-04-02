@@ -123,6 +123,12 @@ Definition params_to_tenv (params : list (term_var * located_type))
 Definition params_to_store (params : list (term_var * located_type))
   : store_type := map bind_to_store_entry params.
 
+(* Pattern coverage: every constructor of type tc in DI has a pattern. *)
+Definition pats_cover (DI : datacon_info) (tc : tycon) (pats : list pat) : Prop :=
+  forall K fts,
+    In (K, (tc, fts)) DI ->
+    exists binds body, In (pat_clause K binds body) pats.
+
 (* ================================================================= *)
 (* Typing judgments for LoCal (thesis §2.2.1, Figures types1/types2) *)
 (*                                                                   *)
@@ -313,6 +319,7 @@ Inductive has_type :
       forall FE DI G S0 C A N A' N' scrut ps tc_s l_s r_s t,
         has_type FE DI G S0 C A N A N
                  (e_val scrut) (LocTy tc_s l_s r_s) ->
+        pats_cover DI tc_s ps ->
         pats_have_type FE DI tc_s G S0 C A N A' N' t ps ->
         has_type FE DI G S0 C A N A' N' (e_case scrut ps) t
 
@@ -338,6 +345,7 @@ with pat_has_type :
              dc binds body tc fieldtcs tc_res l r,
         In (dc, (tc, fieldtcs)) DI ->
         tc = tc_s ->
+        pat_field_tycons binds = fieldtcs ->
         In ((l, r), tc_res) S0 ->
         has_type FE DI
                  (extend_tenv_list G binds)

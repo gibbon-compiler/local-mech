@@ -364,13 +364,7 @@ Inductive field_starts :
       field_starts DI S r j Ts starts ->
       field_starts DI S r i (T :: Ts) (i :: starts).
 
-(* Extract the tycon from each field binding in a pattern. *)
-Definition pat_field_tycons (binds : list (term_var * ty)) : list tycon :=
-  List.map (fun '(_, loc_ty T _ _) => T) binds.
-
-(* Extract term variable names from pattern bindings. *)
-Definition pat_term_vars (binds : list (term_var * ty)) : list term_var :=
-  List.map fst binds.
+(* pat_field_tycons and pat_term_vars are imported from LoCalSyntax. *)
 
 (* Build concrete-location values for pattern variable substitution.
    Each binding (x, T@l^r) at field start index i in region rc

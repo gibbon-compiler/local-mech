@@ -3,3 +3,4 @@
 LoCalSyntax.v
 LoCalStatic.v
 LoCalDynamic.v
+LoCalSafety.v

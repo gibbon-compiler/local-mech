@@ -119,4 +119,12 @@ Definition ex_tree_case : expr :=
               (mk_term_var "y", loc_ty "Tree" "l_y" "r")]
              (e_val (v_var "x")) ] }>).
 
+(* Helpers on pattern bindings — used by both typing and dynamic rules. *)
+
+Definition pat_field_tycons (binds : list (term_var * ty)) : list tycon :=
+  List.map (fun '(_, loc_ty T _ _) => T) binds.
+
+Definition pat_term_vars (binds : list (term_var * ty)) : list term_var :=
+  List.map fst binds.
+
 End LoCalSyntax.
