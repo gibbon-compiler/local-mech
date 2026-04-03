@@ -8,14 +8,30 @@ The current goal is to formalize LoCal in small, focused modules, following the 
 
 ## Current status
 
-The repository currently contains one mechanization module:
+The repository contains four mechanization modules (in dependency order):
 
-- `LoCalSyntax.v` — a first syntax-focused draft of LoCal, including:
-  - core abstract syntax (`loc_exp`, `ty`, `val`, `expr`, etc.),
-  - custom entries / notation for readable terms,
-  - small example expressions inspired by thesis snippets (`start`, `+1`, `after`, `letloc`, `case`).
+- `LoCalSyntax.v` — core abstract syntax for LoCal, including:
+  - identifier wrapper types (`loc_var`, `region_var`, `term_var`, etc.),
+  - abstract syntax types (`loc_exp`, `ty`, `val`, `expr`, `pat`, `fdecl`, etc.),
+  - custom notation entries for readable terms,
+  - small example expressions inspired by thesis snippets.
 
-Typing, operational semantics, and metatheory proofs are planned next.
+- `LoCalStatic.v` — the LoCal type system (thesis §2.2.1), including:
+  - typing environment definitions (Γ, Σ, C, A, N),
+  - the `has_type` inductive judgment threading input/output alloc and nursery environments,
+  - typing rules for all expression forms: variables, `let`, `letregion`, `letloc`, data constructors, `case`, and function application.
+
+- `LoCalDynamic.v` — the small-step operational semantics (thesis §2.2.2), including:
+  - runtime structures: store, location map, concrete addresses,
+  - the `step` relation (`S ; M ; e ⇒ S' ; M' ; e'`),
+  - multi-step closure (`multi_step`),
+  - auxiliary definitions: substitution, `end_witness`, `field_starts`.
+
+- `LoCalSafety.v` — type safety (thesis §2.2.3 and Appendix A), including:
+  - store well-formedness (`store_wf`), covering map-store consistency, constructor-application well-formedness, and allocation well-formedness,
+  - **Progress** — proved: a well-typed expression in an empty variable environment is a value or can step,
+  - **Preservation** — stated with a detailed proof sketch, admitted pending the substitution lemma,
+  - **Type Safety** — stated, follows from Progress and Preservation (admitted).
 
 ## Build instructions
 
@@ -29,10 +45,5 @@ rocq makefile -f _CoqProject -o Makefile && make
 
 ### Notes on structure
 
-- `LoCalSyntax.v` is the active mechanization entry point today.
-- `materials/` contains reference/specification material and is not part of the core build target for LoCal mechanization work.
-- As the project grows, this section can be expanded with separate files for:
-  - typing rules,
-  - dynamic semantics,
-  - auxiliary lemmas/infrastructure,
-  - type safety proofs.
+- `materials/` contains reference/specification material (STLC developments, the thesis) and is not part of the core build target for LoCal mechanization work.
+- The four `.v` files follow the style of `materials/References.v`: small inductive definitions, custom notation scopes, and explicit constructors for runtime artifacts.
