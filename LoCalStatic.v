@@ -38,6 +38,13 @@ Definition fun_env : Type := list fdecl.
 
 (* ---- Environment operations ---- *)
 
+Fixpoint lookup_tenv (G : type_env) (x : term_var) : option located_type :=
+  match G with
+  | nil => None
+  | (y, t) :: G' =>
+      if term_var_eq_dec x y then Some t else lookup_tenv G' x
+  end.
+
 Definition extend_tenv (G : type_env) (x : term_var) (t : located_type)
   : type_env := cons (x, t) G.
 
@@ -125,7 +132,7 @@ Inductive has_type :
      Γ;Σ;C;A;N ⊢ A;N; x : τ@l^r       *)
   | T_Var :
       forall FDs DI G S0 C A N x tc l r,
-        In (x, LocTy tc l r) G ->
+        lookup_tenv G x = Some (LocTy tc l r) ->
         In ((l, r), tc) S0 ->
         has_type FDs DI G S0 C A N A N (e_val (v_var x)) (LocTy tc l r)
 
