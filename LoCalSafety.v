@@ -549,6 +549,18 @@ Proof.
       * apply IH in Hin as [t' Hlk]. exists t'. exact Hlk.
 Qed.
 
+Lemma lookup_tenv_In :
+  forall G x t,
+    lookup_tenv G x = Some t ->
+    In (x, t) G.
+Proof.
+  induction G as [| [y u] G IH]; intros x t Hlk; simpl in *.
+  - discriminate.
+  - destruct (term_var_eq_dec x y) as [Heq | Hneq].
+    + inversion Hlk; subst. left. reflexivity.
+    + right. eapply IH. exact Hlk.
+Qed.
+
 Lemma extend_tenv_list_rev :
   forall G binds,
     extend_tenv_list G binds = (rev binds ++ G)%list.
@@ -684,6 +696,9 @@ with pats_have_type_ind' := Induction for pats_have_type Sort Prop.
 
 Combined Scheme typing_mutind
   from has_type_ind', pat_has_type_ind', pats_have_type_ind'.
+
+Definition gamma_binders_disjoint (G : type_env) (e : expr) : Prop :=
+  forall x t, In (x, t) G -> ~ In x (expr_bound_term_vars e).
 
 (* The thesis treats fresh location/region binders as an implicit
    side-condition.  We keep the typing rules monotone, and instead
@@ -2772,23 +2787,24 @@ Qed.
 (* ================================================================= *)
 
 Theorem preservation :
-  forall FDs DI Sigma C A N Aout Nout Afresh Nfresh M S e Ty S' M' e',
+  forall FDs DI G Sigma C A N Aout Nout Afresh Nfresh M S e Ty S' M' e',
     Forall (fdecl_has_type FDs DI) FDs ->
-    has_type FDs DI nil Sigma C A N Aout Nout e Ty ->
-    has_type_fresh FDs DI nil Sigma C A N Afresh Nfresh e Ty ->
+    gamma_binders_disjoint G e ->
+    has_type FDs DI G Sigma C A N Aout Nout e Ty ->
+    has_type_fresh FDs DI G Sigma C A N Afresh Nfresh e Ty ->
     store_wf DI Sigma C A N M S ->
     step FDs DI S M e S' M' e' ->
     exists Sigma' C' Ain' Nin',
-      has_type FDs DI nil Sigma' C' Ain' Nin' Aout Nout e' Ty
+      has_type FDs DI G Sigma' C' Ain' Nin' Aout Nout e' Ty
       /\ store_wf DI Sigma' C' Ain' Nin' M' S'
       /\ store_extends Sigma Sigma'
       /\ conloc_extends C C'.
 Proof.
-  intros FDs DI Sigma C A N Aout Nout Afresh Nfresh M S e Ty S' M' e'
-         Hfds Hty Hfresh Hwf Hstep.
-  revert Ty Sigma C A N Aout Nout Afresh Nfresh Hfds Hty Hfresh Hwf.
+  intros FDs DI G Sigma C A N Aout Nout Afresh Nfresh M S e Ty S' M' e'
+         Hfds Hgamma Hty Hfresh Hwf Hstep.
+  revert G Ty Sigma C A N Aout Nout Afresh Nfresh Hfds Hgamma Hty Hfresh Hwf.
   induction Hstep;
-    intros Ty Sigma C A N Aout Nout Afresh Nfresh Hfds Hty Hfresh Hwf.
+    intros G Ty Sigma C A N Aout Nout Afresh Nfresh Hfds Hgamma Hty Hfresh Hwf.
   - (* D_DataCon *)
     admit.
   - (* D_LetLoc_Start *)
@@ -2802,14 +2818,18 @@ Proof.
     destruct Ty as [tc2 l2 r2].
     eapply has_type_let_inv in Hty as [A1 [N1 [Hty1 Hbody]]].
     eapply has_type_fresh_let_inv in Hfresh as [A1f [N1f [Hfresh1 Hfresh_body]]].
+    assert (Hgamma_e1 : gamma_binders_disjoint G e1).
+    { intros y t HinG HinB.
+      apply (Hgamma y t HinG). simpl. apply in_or_app. left. exact HinB.
+    }
     assert (Hfresh1' :
-      has_type_fresh FDs DI [] Sigma C A N A1 N1 e1 (LocTy tc1 l1 r1)).
+      has_type_fresh FDs DI G Sigma C A N A1 N1 e1 (LocTy tc1 l1 r1)).
     { eapply expr_has_type_fresh_realign.
       - exact Hty1.
       - exact Hfresh1.
     }
-    destruct (IHHstep (LocTy tc1 l1 r1) Sigma C A N A1 N1 A1 N1
-                      Hfds Hty1 Hfresh1' Hwf)
+    destruct (IHHstep G (LocTy tc1 l1 r1) Sigma C A N A1 N1 A1 N1
+                      Hfds Hgamma_e1 Hty1 Hfresh1' Hwf)
       as [Sigma' [C' [Ain' [Nin' [Hty' [Hwf' [Hse Hce]]]]]]].
     eapply preservation_let_expr_case; eauto.
   - (* D_Let_Val *)
@@ -2819,8 +2839,17 @@ Proof.
     eapply preservation_let_val_case.
     + exact Hty_let.
     + intros y Hy Hin.
-      exfalso.
-      eapply typed_value_nil_no_term_vars; eauto.
+      inversion Hval; subst; simpl in Hy.
+      * destruct Hy as [Heq | Hy].
+        -- subst.
+           match goal with
+           | [ Hlk : lookup_tenv G ?x = Some ?t |- _ ] =>
+               apply (Hgamma x t);
+               [eapply lookup_tenv_In; exact Hlk |]
+           end.
+           ++ simpl. right. exact Hin.
+        -- contradiction.
+      * contradiction.
     + exact Hwf.
   - (* D_LetRegion *)
     eapply preservation_letregion_case; eauto.
