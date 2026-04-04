@@ -319,6 +319,20 @@ Proof.
   intros. inversion H; subst. eauto.
 Qed.
 
+Lemma has_type_let_inv :
+  forall FDs DI G Sigma C A N Aout Nout x tc1 l1 r1 e1 e2 Ty,
+    has_type FDs DI G Sigma C A N Aout Nout
+             (e_let x (LocTy tc1 l1 r1) e1 e2) Ty ->
+    exists A1 N1,
+      has_type FDs DI G Sigma C A N A1 N1 e1 (LocTy tc1 l1 r1)
+      /\ has_type FDs DI (extend_tenv G x (LocTy tc1 l1 r1))
+                   (extend_store Sigma (l1, r1) tc1)
+                   C A1 N1 Aout Nout e2 Ty.
+Proof.
+  intros FDs DI G Sigma C A N Aout Nout x tc1 l1 r1 e1 e2 Ty Hty.
+  inversion Hty; subst. eauto.
+Qed.
+
 Definition tenv_equiv (G1 G2 : type_env) : Prop :=
   forall x, lookup_tenv G1 x = lookup_tenv G2 x.
 
@@ -327,6 +341,9 @@ Definition store_extends (Sigma Sigma' : store_type) : Prop :=
 
 Definition conloc_extends (C C' : conloc_env) : Prop :=
   forall lr le, In (lr, le) C -> In (lr, le) C'.
+
+Definition alloc_extends (A A' : alloc_env) : Prop :=
+  forall r ap, In (r, ap) A -> exists ap', In (r, ap') A'.
 
 Lemma store_extends_refl :
   forall Sigma,
@@ -340,6 +357,53 @@ Lemma conloc_extends_refl :
     conloc_extends C C.
 Proof.
   unfold conloc_extends. auto.
+Qed.
+
+Lemma alloc_extends_refl :
+  forall A,
+    alloc_extends A A.
+Proof.
+  unfold alloc_extends. eauto.
+Qed.
+
+Lemma alloc_extends_trans :
+  forall A A' A'',
+    alloc_extends A A' ->
+    alloc_extends A' A'' ->
+    alloc_extends A A''.
+Proof.
+  intros A A' A'' H12 H23 r ap Hin.
+  destruct (H12 r ap Hin) as [ap' Hin'].
+  eauto.
+Qed.
+
+Lemma in_remove_alloc_region_preserve :
+  forall A r0 r ap,
+    r <> r0 ->
+    In (r, ap) A ->
+    In (r, ap) (remove_alloc_region A r0).
+Proof.
+  intros A r0 r ap Hneq Hin.
+  induction A as [| [r1 ap1] A IH]; simpl in *.
+  - contradiction.
+  - destruct (region_var_eq_dec r1 r0).
+    + subst r1. destruct Hin as [Heq | Hin].
+      * inversion Heq; subst. contradiction.
+      * exact (IH Hin).
+    + destruct Hin as [Heq | Hin].
+      * left. exact Heq.
+      * right. exact (IH Hin).
+Qed.
+
+Lemma alloc_extends_extend_alloc :
+  forall A r ap,
+    alloc_extends A (extend_alloc A r ap).
+Proof.
+  intros A r ap r0 ap0 Hin.
+  destruct (region_var_eq_dec r0 r) as [Heq | Hneq].
+  - subst. exists ap. simpl. left. reflexivity.
+  - exists ap0. simpl. right.
+    eapply in_remove_alloc_region_preserve; eauto.
 Qed.
 
 Lemma in_remove_alloc_region_preserved :
@@ -600,6 +664,18 @@ Proof.
   inversion Hty; subst; auto.
 Qed.
 
+Lemma typed_value_nil_no_term_vars :
+  forall FDs DI Sigma C A N A' N' vl T y,
+    has_type FDs DI nil Sigma C A N A' N' (e_val vl) T ->
+    In y (val_term_vars vl) ->
+    False.
+Proof.
+  intros FDs DI Sigma C A N A' N' vl T y Hty Hin.
+  inversion Hty; subst; simpl in *.
+  - discriminate.
+  - exact Hin.
+Qed.
+
 Scheme has_type_ind' := Induction for has_type Sort Prop
 with field_vals_have_type_ind' := Induction for field_vals_have_type Sort Prop
 with app_vals_have_type_ind' := Induction for app_vals_have_type Sort Prop
@@ -730,6 +806,63 @@ with pats_have_type_fresh :
 Scheme has_type_fresh_ind' := Induction for has_type_fresh Sort Prop
 with pat_has_type_fresh_ind' := Induction for pat_has_type_fresh Sort Prop
 with pats_have_type_fresh_ind' := Induction for pats_have_type_fresh Sort Prop.
+
+Lemma has_type_fresh_let_inv :
+  forall FDs DI G Sigma C A N Aout Nout x tc1 l1 r1 e1 e2 Ty,
+    has_type_fresh FDs DI G Sigma C A N Aout Nout
+                    (e_let x (LocTy tc1 l1 r1) e1 e2) Ty ->
+    exists A1 N1,
+      has_type_fresh FDs DI G Sigma C A N A1 N1 e1 (LocTy tc1 l1 r1)
+      /\ has_type_fresh FDs DI (extend_tenv G x (LocTy tc1 l1 r1))
+                         (extend_store Sigma (l1, r1) tc1)
+                         C A1 N1 Aout Nout e2 Ty.
+Proof.
+  intros FDs DI G Sigma C A N Aout Nout x tc1 l1 r1 e1 e2 Ty Hfresh.
+  inversion Hfresh; subst. eauto.
+Qed.
+
+Definition expr_fresh_realign_case
+  FDs DI G Sigma C A N Aout Nout e T
+  (HT : has_type FDs DI G Sigma C A N Aout Nout e T) : Prop :=
+  forall Aoutf Noutf,
+    has_type_fresh FDs DI G Sigma C A N Aoutf Noutf e T ->
+    has_type_fresh FDs DI G Sigma C A N Aout Nout e T.
+
+Definition pat_fresh_realign_case
+  FDs DI tc_s G Sigma C A N Aout Nout T p
+  (HT : pat_has_type FDs DI tc_s G Sigma C A N Aout Nout T p) : Prop :=
+  forall Aoutf Noutf,
+    pat_has_type_fresh FDs DI tc_s G Sigma C A N Aoutf Noutf T p ->
+    pat_has_type_fresh FDs DI tc_s G Sigma C A N Aout Nout T p.
+
+Definition pats_fresh_realign_case
+  FDs DI tc_s G Sigma C A N Aout Nout T ps
+  (HT : pats_have_type FDs DI tc_s G Sigma C A N Aout Nout T ps) : Prop :=
+  forall Aoutf Noutf,
+    pats_have_type_fresh FDs DI tc_s G Sigma C A N Aoutf Noutf T ps ->
+    pats_have_type_fresh FDs DI tc_s G Sigma C A N Aout Nout T ps.
+
+Theorem has_type_fresh_realign_mutual :
+  (forall FDs DI G Sigma C A N Aout Nout e T
+      (HT : has_type FDs DI G Sigma C A N Aout Nout e T),
+      expr_fresh_realign_case FDs DI G Sigma C A N Aout Nout e T HT)
+  /\
+  (forall FDs DI tc_s G Sigma C A N Aout Nout T p
+      (HT : pat_has_type FDs DI tc_s G Sigma C A N Aout Nout T p),
+      pat_fresh_realign_case FDs DI tc_s G Sigma C A N Aout Nout T p HT)
+  /\
+  (forall FDs DI tc_s G Sigma C A N Aout Nout T ps
+      (HT : pats_have_type FDs DI tc_s G Sigma C A N Aout Nout T ps),
+      pats_fresh_realign_case FDs DI tc_s G Sigma C A N Aout Nout T ps HT).
+Admitted.
+
+Corollary expr_has_type_fresh_realign :
+  forall FDs DI G Sigma C A N Aout Nout e T,
+    has_type FDs DI G Sigma C A N Aout Nout e T ->
+    forall Aoutf Noutf,
+      has_type_fresh FDs DI G Sigma C A N Aoutf Noutf e T ->
+      has_type_fresh FDs DI G Sigma C A N Aout Nout e T.
+Admitted.
 
 Lemma lookup_loc_extend_eq :
   forall M lr cl,
@@ -2208,48 +2341,58 @@ Proof.
 Qed.
 
 Lemma preservation_let_val_case :
-  forall FDs DI Sigma C A N Aout Nout M S x T1 vl e2 T,
-    has_type FDs DI nil Sigma C A N Aout Nout (e_let x T1 (e_val vl) e2) T ->
+  forall FDs DI G Sigma C A N Aout Nout M S x tc1 l1 r1 vl e2 T,
+    has_type FDs DI G Sigma C A N Aout Nout
+             (e_let x (LocTy tc1 l1 r1) (e_val vl) e2) T ->
+    (forall y, In y (val_term_vars vl) -> ~ In y (expr_bound_term_vars e2)) ->
     store_wf DI Sigma C A N M S ->
     exists Sigma' C' Ain' Nin',
-      has_type FDs DI nil Sigma' C' Ain' Nin' Aout Nout
+      has_type FDs DI G Sigma' C' Ain' Nin' Aout Nout
                (subst_val x vl e2) T
       /\ store_wf DI Sigma' C' Ain' Nin' M S
       /\ store_extends Sigma Sigma'
       /\ conloc_extends C C'.
 Proof.
-  intros FDs DI Sigma C A N Aout Nout M S x T1 vl e2 T Hty Hwf.
-  inversion Hty; subst.
-  destruct (has_type_value_same_io _ _ _ _ _ _ _ _ _ _ _ H13) as [HA' HN'].
-  subst A' N'.
-  inversion H13; subst.
-  - simpl in H11. discriminate.
-  - exists (extend_store Sigma (l1, r1) tc1), C, A, N.
-    split.
-    + eapply substitution_val.
-      * exact H14.
-      * apply T_ConcreteLoc. simpl. auto.
-      * intros y Hy. inversion Hy.
+  intros FDs DI G Sigma C A N Aout Nout M S x tc1 l1 r1 vl e2 T
+         Hty Hnocapture Hwf.
+  eapply has_type_let_inv in Hty as [A1 [N1 [Hval Hbody]]].
+  destruct (has_type_value_same_io _ _ _ _ _ _ _ _ _ _ _ Hval) as [HA1 HN1].
+  subst A1 N1.
+  assert (Hstore_here : In ((l1, r1), tc1) Sigma).
+  { inversion Hval; subst; assumption. }
+  assert (Hval_ext :
+            has_type FDs DI G (extend_store Sigma (l1, r1) tc1) C A N A N
+                     (e_val vl) (LocTy tc1 l1 r1)).
+  { eapply expr_has_type_sigma_c_monotone.
+    - exact Hval.
+    - intros lr tc Hin. simpl. right. exact Hin.
+    - apply conloc_extends_refl. }
+  exists (extend_store Sigma (l1, r1) tc1), C, A, N.
+  split.
+  - eapply substitution_val.
+    + exact Hbody.
+    + exact Hval_ext.
+    + exact Hnocapture.
+  - split.
+    + eapply store_wf_extend_store_existing.
+      * exact Hwf.
+      * exact Hstore_here.
     + split.
-      * eapply store_wf_extend_store_existing.
-        -- exact Hwf.
-        -- exact H10.
-      * split.
-        -- intros lr tc Hin. right. exact Hin.
-        -- apply conloc_extends_refl.
+      * intros lr tc Hin. right. exact Hin.
+      * apply conloc_extends_refl.
 Qed.
 
 Lemma preservation_letregion_case :
-  forall FDs DI Sigma C A N Aout Nout M S r body T,
-    has_type FDs DI nil Sigma C A N Aout Nout (e_letregion r body) T ->
+  forall FDs DI G Sigma C A N Aout Nout M S r body T,
+    has_type FDs DI G Sigma C A N Aout Nout (e_letregion r body) T ->
     store_wf DI Sigma C A N M S ->
     exists Sigma' C' Ain' Nin',
-      has_type FDs DI nil Sigma' C' Ain' Nin' Aout Nout body T
+      has_type FDs DI G Sigma' C' Ain' Nin' Aout Nout body T
       /\ store_wf DI Sigma' C' Ain' Nin' M S
       /\ store_extends Sigma Sigma'
       /\ conloc_extends C C'.
 Proof.
-  intros FDs DI Sigma C A N Aout Nout M S r body T Hty Hwf.
+  intros FDs DI G Sigma C A N Aout Nout M S r body T Hty Hwf.
   inversion Hty; subst.
   exists Sigma, C, (extend_alloc A r AP_None), N.
   split.
@@ -2262,19 +2405,20 @@ Proof.
 Qed.
 
 Lemma preservation_letloc_start_case :
-  forall FDs DI Sigma C A N Aout Nout M S l r body T,
-    has_type FDs DI nil Sigma C A N Aout Nout
+  forall FDs DI G Sigma C A N Aout Nout Afresh Nfresh M S l r body T,
+    has_type FDs DI G Sigma C A N Aout Nout
              (e_letloc l r (LE_Start r) body) T ->
-    has_type_fresh FDs DI nil Sigma C A N Aout Nout
+    has_type_fresh FDs DI G Sigma C A N Afresh Nfresh
                     (e_letloc l r (LE_Start r) body) T ->
     store_wf DI Sigma C A N M S ->
     exists Sigma' C' Ain' Nin',
-      has_type FDs DI nil Sigma' C' Ain' Nin' Aout Nout body T
+      has_type FDs DI G Sigma' C' Ain' Nin' Aout Nout body T
       /\ store_wf DI Sigma' C' Ain' Nin' (extend_loc M (l, r) (r, 0)) S
       /\ store_extends Sigma Sigma'
       /\ conloc_extends C C'.
 Proof.
-  intros FDs DI Sigma C A N Aout Nout M S l r body T Hty Hfresh Hwf.
+  intros FDs DI G Sigma C A N Aout Nout Afresh Nfresh M S l r body T
+         Hty Hfresh Hwf.
   inversion Hty; subst. clear Hty.
   inversion Hfresh; subst. clear Hfresh.
   exists Sigma,
@@ -2294,20 +2438,20 @@ Proof.
 Qed.
 
 Lemma preservation_letloc_tag_case :
-  forall FDs DI Sigma C A N Aout Nout M S l lprev r body T rc i,
-    has_type FDs DI nil Sigma C A N Aout Nout
+  forall FDs DI G Sigma C A N Aout Nout Afresh Nfresh M S l lprev r body T rc i,
+    has_type FDs DI G Sigma C A N Aout Nout
              (e_letloc l r (LE_Next lprev r) body) T ->
-    has_type_fresh FDs DI nil Sigma C A N Aout Nout
+    has_type_fresh FDs DI G Sigma C A N Afresh Nfresh
                     (e_letloc l r (LE_Next lprev r) body) T ->
     store_wf DI Sigma C A N M S ->
     lookup_loc M (lprev, r) = Some (rc, i) ->
     exists Sigma' C' Ain' Nin',
-      has_type FDs DI nil Sigma' C' Ain' Nin' Aout Nout body T
+      has_type FDs DI G Sigma' C' Ain' Nin' Aout Nout body T
       /\ store_wf DI Sigma' C' Ain' Nin' (extend_loc M (l, r) (rc, i + 1)) S
       /\ store_extends Sigma Sigma'
       /\ conloc_extends C C'.
 Proof.
-  intros FDs DI Sigma C A N Aout Nout M S l lprev r body T rc i
+  intros FDs DI G Sigma C A N Aout Nout Afresh Nfresh M S l lprev r body T rc i
          Hty Hfresh Hwf Hlookup.
   inversion Hty; subst; clear Hty.
   inversion Hfresh; subst; clear Hfresh.
@@ -2337,21 +2481,21 @@ Proof.
 Qed.
 
 Lemma preservation_letloc_after_case :
-  forall FDs DI Sigma C A N Aout Nout M S l l1 r tc_prev body T rc i j,
-    has_type FDs DI nil Sigma C A N Aout Nout
+  forall FDs DI G Sigma C A N Aout Nout Afresh Nfresh M S l l1 r tc_prev body T rc i j,
+    has_type FDs DI G Sigma C A N Aout Nout
              (e_letloc l r (LE_After tc_prev l1 r) body) T ->
-    has_type_fresh FDs DI nil Sigma C A N Aout Nout
+    has_type_fresh FDs DI G Sigma C A N Afresh Nfresh
                     (e_letloc l r (LE_After tc_prev l1 r) body) T ->
     store_wf DI Sigma C A N M S ->
     lookup_loc M (l1, r) = Some (rc, i) ->
     end_witness DI S (rc, i) tc_prev (rc, j) ->
     exists Sigma' C' Ain' Nin',
-      has_type FDs DI nil Sigma' C' Ain' Nin' Aout Nout body T
+      has_type FDs DI G Sigma' C' Ain' Nin' Aout Nout body T
       /\ store_wf DI Sigma' C' Ain' Nin' (extend_loc M (l, r) (rc, j)) S
       /\ store_extends Sigma Sigma'
       /\ conloc_extends C C'.
 Proof.
-  intros FDs DI Sigma C A N Aout Nout M S l l1 r tc_prev body T rc i j
+  intros FDs DI G Sigma C A N Aout Nout Afresh Nfresh M S l l1 r tc_prev body T rc i j
          Hty Hfresh Hwf Hlookup Hew.
   inversion Hty; subst; clear Hty.
   inversion Hfresh; subst; clear Hfresh.
@@ -2379,20 +2523,20 @@ Proof.
 Qed.
 
 Lemma preserve_let_under_step :
-  forall FDs DI Sigma C A' N' Aout Nout
+  forall FDs DI G Sigma C A' N' Aout Nout
          Sigma' C' Ain' Nin'
          x tc1 l1 r1 e1' e2 tc2 l2 r2,
-    has_type FDs DI nil Sigma' C' Ain' Nin' A' N' e1'
+    has_type FDs DI G Sigma' C' Ain' Nin' A' N' e1'
              (LocTy tc1 l1 r1) ->
-    has_type FDs DI (extend_tenv nil x (LocTy tc1 l1 r1))
+    has_type FDs DI (extend_tenv G x (LocTy tc1 l1 r1))
              (extend_store Sigma (l1, r1) tc1)
              C A' N' Aout Nout e2 (LocTy tc2 l2 r2) ->
     store_extends Sigma Sigma' ->
     conloc_extends C C' ->
-    has_type FDs DI nil Sigma' C' Ain' Nin' Aout Nout
+    has_type FDs DI G Sigma' C' Ain' Nin' Aout Nout
              (e_let x (LocTy tc1 l1 r1) e1' e2) (LocTy tc2 l2 r2).
 Proof.
-  intros FDs DI Sigma C A' N' Aout Nout
+  intros FDs DI G Sigma C A' N' Aout Nout
          Sigma' C' Ain' Nin'
          x tc1 l1 r1 e1' e2 tc2 l2 r2 He1 Hbody Hse Hce.
   eapply T_Let.
@@ -2404,26 +2548,26 @@ Proof.
 Qed.
 
 Lemma preservation_let_expr_case :
-  forall FDs DI Sigma C A' N' Aout Nout
+  forall FDs DI G Sigma C A' N' Aout Nout
          Sigma' C' Ain' Nin'
          M' S'
          x tc1 l1 r1 e1' e2 tc2 l2 r2,
-    has_type FDs DI nil Sigma' C' Ain' Nin' A' N' e1'
+    has_type FDs DI G Sigma' C' Ain' Nin' A' N' e1'
              (LocTy tc1 l1 r1) ->
-    has_type FDs DI (extend_tenv nil x (LocTy tc1 l1 r1))
+    has_type FDs DI (extend_tenv G x (LocTy tc1 l1 r1))
              (extend_store Sigma (l1, r1) tc1)
              C A' N' Aout Nout e2 (LocTy tc2 l2 r2) ->
     store_wf DI Sigma' C' Ain' Nin' M' S' ->
     store_extends Sigma Sigma' ->
     conloc_extends C C' ->
     exists Sigma'' C'' Ain'' Nin'',
-      has_type FDs DI nil Sigma'' C'' Ain'' Nin'' Aout Nout
+      has_type FDs DI G Sigma'' C'' Ain'' Nin'' Aout Nout
                (e_let x (LocTy tc1 l1 r1) e1' e2) (LocTy tc2 l2 r2)
       /\ store_wf DI Sigma'' C'' Ain'' Nin'' M' S'
       /\ store_extends Sigma Sigma''
       /\ conloc_extends C C''.
 Proof.
-  intros FDs DI Sigma C A' N' Aout Nout
+  intros FDs DI G Sigma C A' N' Aout Nout
          Sigma' C' Ain' Nin'
          M' S'
          x tc1 l1 r1 e1' e2 tc2 l2 r2
@@ -2628,56 +2772,62 @@ Qed.
 (* ================================================================= *)
 
 Theorem preservation :
-  forall FDs DI Sigma C A N Aout Nout M S e T S' M' e',
+  forall FDs DI Sigma C A N Aout Nout Afresh Nfresh M S e Ty S' M' e',
     Forall (fdecl_has_type FDs DI) FDs ->
-    has_type FDs DI nil Sigma C A N Aout Nout e T ->
-    has_type_fresh FDs DI nil Sigma C A N Aout Nout e T ->
+    has_type FDs DI nil Sigma C A N Aout Nout e Ty ->
+    has_type_fresh FDs DI nil Sigma C A N Afresh Nfresh e Ty ->
     store_wf DI Sigma C A N M S ->
     step FDs DI S M e S' M' e' ->
     exists Sigma' C' Ain' Nin',
-      has_type FDs DI nil Sigma' C' Ain' Nin' Aout Nout e' T
+      has_type FDs DI nil Sigma' C' Ain' Nin' Aout Nout e' Ty
       /\ store_wf DI Sigma' C' Ain' Nin' M' S'
       /\ store_extends Sigma Sigma'
       /\ conloc_extends C C'.
 Proof.
-  (* By rule induction on the step derivation.
-     Key cases:
-       D_DataCon —
-         Σ' = Σ ∪ {(l,r) ↦ T}.
-         Typing: by T_ConcreteLoc with the extended Σ'.
-         Store WF:
-           map-store consistency for (l,r): construct end-witness
-             from field typing + constr_app_wf.
-           map-store consistency for others: end-witness preserved
-             because write-once ensures no overlap.
-           alloc_wf: nursery shrinks (remove (l,r)), allocptr shifts.
-           dom(Σ') ∩ N' = ∅: (l,r) removed from N'.
-
-       D_LetLoc_Start / D_LetLoc_Tag / D_LetLoc_After —
-         Σ' = Σ, C' updated with new constraint.
-         Typing: directly from typing inversion.
-         Store WF: constr_app_wf extended, alloc_wf maintained
-           via allocptr reasoning.
-
-       D_Let_Val —
-         Apply substitution lemma.
-         Store WF unchanged (S, M not modified).
-
-       D_Let_Expr —
-         IH on the stepped sub-expression, then rebuild T_Let.
-
-       D_Case —
-         Σ' extended with field location types.
-         Apply substitution lemma for pattern variables.
-         Store WF: M extended but S unchanged; field locations
-           get end-witness from scrutinee's end-witness.
-
-       D_App —
-         Apply substitution/value-location instantiation for the callee body.
-         Store WF unchanged.
-
-       D_LetRegion —
-         Straightforward; store and M unchanged. *)
+  intros FDs DI Sigma C A N Aout Nout Afresh Nfresh M S e Ty S' M' e'
+         Hfds Hty Hfresh Hwf Hstep.
+  revert Ty Sigma C A N Aout Nout Afresh Nfresh Hfds Hty Hfresh Hwf.
+  induction Hstep;
+    intros Ty Sigma C A N Aout Nout Afresh Nfresh Hfds Hty Hfresh Hwf.
+  - (* D_DataCon *)
+    admit.
+  - (* D_LetLoc_Start *)
+    eapply preservation_letloc_start_case; eauto.
+  - (* D_LetLoc_Tag *)
+    eapply preservation_letloc_tag_case; eauto.
+  - (* D_LetLoc_After *)
+    eapply preservation_letloc_after_case; eauto.
+  - (* D_Let_Expr *)
+    destruct T as [tc1 l1 r1].
+    destruct Ty as [tc2 l2 r2].
+    eapply has_type_let_inv in Hty as [A1 [N1 [Hty1 Hbody]]].
+    eapply has_type_fresh_let_inv in Hfresh as [A1f [N1f [Hfresh1 Hfresh_body]]].
+    assert (Hfresh1' :
+      has_type_fresh FDs DI [] Sigma C A N A1 N1 e1 (LocTy tc1 l1 r1)).
+    { eapply expr_has_type_fresh_realign.
+      - exact Hty1.
+      - exact Hfresh1.
+    }
+    destruct (IHHstep (LocTy tc1 l1 r1) Sigma C A N A1 N1 A1 N1
+                      Hfds Hty1 Hfresh1' Hwf)
+      as [Sigma' [C' [Ain' [Nin' [Hty' [Hwf' [Hse Hce]]]]]]].
+    eapply preservation_let_expr_case; eauto.
+  - (* D_Let_Val *)
+    pose proof Hty as Hty_let.
+    destruct T as [tc1 l1 r1].
+    eapply has_type_let_inv in Hty as [A1 [N1 [Hval Hbody]]].
+    eapply preservation_let_val_case.
+    + exact Hty_let.
+    + intros y Hy Hin.
+      exfalso.
+      eapply typed_value_nil_no_term_vars; eauto.
+    + exact Hwf.
+  - (* D_LetRegion *)
+    eapply preservation_letregion_case; eauto.
+  - (* D_App *)
+    admit.
+  - (* D_Case *)
+    admit.
 Admitted.
 
 (* ================================================================= *)
@@ -2693,10 +2843,10 @@ Admitted.
 (* ================================================================= *)
 
 Theorem type_safety :
-  forall FDs DI Sigma C A N A' N' M S e T Sn Mn en,
+  forall FDs DI Sigma C A N A' N' Afresh Nfresh M S e T Sn Mn en,
     Forall (fdecl_has_type FDs DI) FDs ->
     has_type FDs DI nil Sigma C A N A' N' e T ->
-    has_type_fresh FDs DI nil Sigma C A N A' N' e T ->
+    has_type_fresh FDs DI nil Sigma C A N Afresh Nfresh e T ->
     store_wf DI Sigma C A N M S ->
     di_functional DI ->
     expr_wf M e ->

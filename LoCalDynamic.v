@@ -105,11 +105,9 @@ Definition is_val (e : expr) : bool :=
 (* ================================================================= *)
 (* Term-variable substitution  (e[v/x])                              *)
 (*                                                                    *)
-(* This is the direct named-variable substitution used by the current *)
-(* mechanization. It matches the thesis on already-uniquified source  *)
-(* terms, i.e. when the binder-uniqueness convention from             *)
-(* LoCalSyntax is maintained. Outside that regime, open-value         *)
-(* substitution would need explicit freshening.                       *)
+(* This is the raw named-variable substitution on syntax.             *)
+(* Capture avoidance is handled separately by explicit freshening,    *)
+(* following the thesis's Freshen(...) side condition.                *)
 (* ================================================================= *)
 
 (* Substitute value s for term variable x in a value. *)
@@ -156,6 +154,22 @@ Fixpoint subst_vals (xs : list term_var) (vs : list val) (e : expr) : expr :=
   | _, _ => e
   end.
 
+Definition subst_val_fresh (x : term_var) (s : val) (e : expr) : expr :=
+  subst_val x s
+    (freshen_expr_with
+       (val_term_vars s)
+       (val_symbolic_laddrs s)
+       (val_region_vars s)
+       e).
+
+Definition subst_vals_fresh (xs : list term_var) (vs : list val) (e : expr) : expr :=
+  subst_vals xs vs
+    (freshen_expr_with
+       (vals_term_vars vs)
+       (vals_symbolic_laddrs vs)
+       (vals_region_vars vs)
+       e).
+
 (* ================================================================= *)
 (* Location/region substitution  (e[l_new^r_new / l_old^r_old])      *)
 (*   Needed for D-App (location parameter instantiation).            *)
@@ -174,8 +188,13 @@ Definition subst_loc_in_locexp
     (le : loc_exp) : loc_exp :=
   match le with
   | LE_Start r   => LE_Start (subst_rvar ro rn r)
-  | LE_Next l r  => LE_Next (subst_lvar lo ln l) (subst_rvar ro rn r)
-  | LE_After T l r => LE_After T (subst_lvar lo ln l) (subst_rvar ro rn r)
+  | LE_Next l r  =>
+      LE_Next (if laddr_eq_dec (l, r) (lo, ro) then ln else l)
+              (subst_rvar ro rn r)
+  | LE_After T l r =>
+      LE_After T
+               (if laddr_eq_dec (l, r) (lo, ro) then ln else l)
+               (subst_rvar ro rn r)
   end.
 
 Definition subst_loc_in_ty
@@ -183,7 +202,10 @@ Definition subst_loc_in_ty
     (ln : loc_var) (rn : region_var)
     (t : ty) : ty :=
   match t with
-  | loc_ty T l r => loc_ty T (subst_lvar lo ln l) (subst_rvar ro rn r)
+  | loc_ty T l r =>
+      loc_ty T
+             (if laddr_eq_dec (l, r) (lo, ro) then ln else l)
+             (subst_rvar ro rn r)
   end.
 
 Definition subst_loc_in_val
@@ -193,14 +215,19 @@ Definition subst_loc_in_val
   match v0 with
   | v_var _ => v0
   | v_cloc r i l rg =>
-      v_cloc (subst_rvar ro rn r) i (subst_lvar lo ln l) (subst_rvar ro rn rg)
+      v_cloc (subst_rvar ro rn r)
+             i
+             (if laddr_eq_dec (l, rg) (lo, ro) then ln else l)
+             (subst_rvar ro rn rg)
   end.
 
 Definition subst_loc_in_laddr
     (lo : loc_var) (ro : region_var)
     (ln : loc_var) (rn : region_var)
     (a : loc_var * region_var) : loc_var * region_var :=
-  (subst_lvar lo ln (fst a), subst_rvar ro rn (snd a)).
+  let '(l, r) := a in
+  ((if laddr_eq_dec (l, r) (lo, ro) then ln else l),
+   subst_rvar ro rn r).
 
 Definition subst_loc_in_bind
     (lo : loc_var) (ro : region_var)
@@ -254,6 +281,31 @@ Fixpoint subst_locs
       subst_locs fs as_ (subst_loc lo ro ln rn e)
   | _, _ => e
   end.
+
+Definition subst_locs_fresh
+    (formals actuals : list (loc_var * region_var))
+    (val_args : list val)
+    (e : expr) : expr :=
+  subst_locs formals actuals
+    (freshen_expr_with
+       (vals_term_vars val_args)
+       (actuals ++ vals_symbolic_laddrs val_args)
+       (loc_arg_regions actuals ++ vals_region_vars val_args)
+       e).
+
+Definition subst_app_fresh
+    (formals actuals : list (loc_var * region_var))
+    (params : list (term_var * ty))
+    (val_args : list val)
+    (e : expr) : expr :=
+  let e' :=
+    freshen_expr_with
+      (vals_term_vars val_args)
+      (actuals ++ vals_symbolic_laddrs val_args)
+      (loc_arg_regions actuals ++ vals_region_vars val_args)
+      e in
+  subst_locs formals actuals
+    (subst_vals (List.map fst params) val_args e').
 
 (* ================================================================= *)
 (* End-witness relation  (thesis §2.2.2 and Appendix §end-witness)   *)
@@ -405,7 +457,9 @@ Inductive step :
            S' M' (e_let x T e1' e2)
 
   (* ---- D-Let-Val ----
-     S; M; let x:τ = v in e₂  ⇒  S; M; e₂[v/x] *)
+     S; M; let x:τ = v in e₂  ⇒  S; M; [v/x]e₂
+     The thesis uses Freshen(FD) for function applications; the let
+     rule itself is ordinary substitution. *)
   | D_Let_Val : forall FDs DI S M x T vl e2,
       step FDs DI S M (e_let x T (e_val vl) e2)
            S M (subst_val x vl e2)
@@ -420,17 +474,13 @@ Inductive step :
      S; M; f [l₁^r₁,...] v₁...vₘ
        ⇒  S; M; e[x₁...xₘ := v₁...vₘ][l'₁^r'₁... := l₁^r₁...]
      where  FD = Function(f),
-            (f x₁...xₘ = e) = Freshen(FD).
-     In this named-syntax development we use the already-uniquified
-     presentation of the rule; app_subst_fresh names the local
-     no-capture obligation that Freshen(FD) discharges in the thesis. *)
+            (f x₁...xₘ = e) = Freshen(FD). *)
   | D_App : forall FDs DI S M f loc_args val_args
                    f_locs f_named_params f_retty f_regions f_body,
       lookup_fdecl FDs f =
         Some (FunDecl f f_locs f_named_params f_retty f_regions f_body) ->
       step FDs DI S M (e_app f loc_args val_args)
-           S M (subst_locs f_locs loc_args
-                  (subst_vals (List.map fst f_named_params) val_args f_body))
+           S M (subst_app_fresh f_locs loc_args f_named_params val_args f_body)
 
   (* ---- D-Case ----
      S; M; case ⟨r,i⟩^(l^r) of [..., K (x₁:τ₁@l₁^r,...) → e, ...]
@@ -530,7 +580,23 @@ Proof.
   { apply D_Let_Expr; [reflexivity | apply D_DataCon; reflexivity]. }
   (* Step 3: D-Let-Val — substitute a := ⟨r,1⟩^(l₁^r) *)
   eapply MS_step. { apply D_Let_Val. }
-  cbn [subst_val subst_in_val List.map
+  cbn [subst_val
+       fresh_term_var fresh_term_var_from fresh_loc_var fresh_loc_var_from
+       fresh_region_var fresh_region_var_from term_var_with_ticks
+       loc_var_with_ticks region_var_with_ticks tick_marks
+       rename_term_in_expr rename_term_in_pat rename_term_in_val rename_term_in_bind
+       rename_loc_in_expr rename_loc_in_pat rename_loc_in_val rename_loc_in_bind
+       rename_loc_in_laddr rename_loc_in_locexp rename_loc_in_ty
+       rename_region_in_expr rename_region_in_pat rename_region_in_val
+       rename_region_in_bind rename_region_in_laddr rename_region_in_locexp
+       rename_region_in_ty
+       expr_occurs_term_vars pat_occurs_term_vars expr_occurs_loc_vars
+       pat_occurs_loc_vars expr_occurs_region_vars pat_occurs_region_vars
+       binds_loc_vars binds_region_vars val_loc_vars val_region_vars
+       vals_loc_vars vals_region_vars loc_arg_loc_vars loc_arg_regions
+       ty_loc_vars ty_region_vars locexp_loc_vars locexp_region_vars
+       pat_term_vars pat_laddrs bind_loc_var bind_region_var
+       subst_val subst_in_val List.map
        term_var_eq_dec string_dec Ascii.ascii_dec Bool.bool_dec
        existsb fst snd].
   (* Step 4: D-LetLoc-After — end-witness(Tree, ⟨r,1⟩, S, ⟨r,2⟩) *)
@@ -543,7 +609,23 @@ Proof.
   { apply D_Let_Expr; [reflexivity | apply D_DataCon; reflexivity]. }
   (* Step 6: D-Let-Val — substitute b := ⟨r,2⟩^(l₂^r) *)
   eapply MS_step. { apply D_Let_Val. }
-  cbn [subst_val subst_in_val List.map
+  cbn [subst_val
+       fresh_term_var fresh_term_var_from fresh_loc_var fresh_loc_var_from
+       fresh_region_var fresh_region_var_from term_var_with_ticks
+       loc_var_with_ticks region_var_with_ticks tick_marks
+       rename_term_in_expr rename_term_in_pat rename_term_in_val rename_term_in_bind
+       rename_loc_in_expr rename_loc_in_pat rename_loc_in_val rename_loc_in_bind
+       rename_loc_in_laddr rename_loc_in_locexp rename_loc_in_ty
+       rename_region_in_expr rename_region_in_pat rename_region_in_val
+       rename_region_in_bind rename_region_in_laddr rename_region_in_locexp
+       rename_region_in_ty
+       expr_occurs_term_vars pat_occurs_term_vars expr_occurs_loc_vars
+       pat_occurs_loc_vars expr_occurs_region_vars pat_occurs_region_vars
+       binds_loc_vars binds_region_vars val_loc_vars val_region_vars
+       vals_loc_vars vals_region_vars loc_arg_loc_vars loc_arg_regions
+       ty_loc_vars ty_region_vars locexp_loc_vars locexp_region_vars
+       pat_term_vars pat_laddrs bind_loc_var bind_region_var
+       subst_val subst_in_val List.map
        term_var_eq_dec string_dec Ascii.ascii_dec Bool.bool_dec
        existsb fst snd].
   (* Step 7: D-DataCon — write Node at address 0 → final value *)
