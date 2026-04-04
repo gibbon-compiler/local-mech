@@ -540,7 +540,7 @@ Proof.
 Qed.
 
 Lemma existsb_bind_hit :
-  forall x (binds : list term_binding),
+  forall x (binds : list (term_var * ty)),
     existsb
       (fun b => if term_var_eq_dec x (fst b) then true else false)
       binds = true ->
@@ -554,7 +554,7 @@ Proof.
 Qed.
 
 Lemma existsb_bind_miss :
-  forall x (binds : list term_binding) t,
+  forall x (binds : list (term_var * ty)) t,
     existsb
       (fun b => if term_var_eq_dec x (fst b) then true else false)
       binds = false ->
@@ -692,9 +692,12 @@ Qed.
 (* Lemma: Substitution  (thesis Appendix A, Lemma Substitution)       *)
 (*                                                                    *)
 (* Substituting well-typed values for variables in a well-typed       *)
-(* expression preserves typing.  Simplified single-variable form.     *)
-(* The full thesis version handles simultaneous value + location      *)
-(* substitution.                                                      *)
+(* expression preserves typing. This is currently the closed-value    *)
+(* version for the named-syntax mechanization. The full thesis lemma  *)
+(* is more general: it allows open values and simultaneous location   *)
+(* substitution under the thesis's unique-binder convention           *)
+(* (formalized in LoCalSyntax via expr_binders_unique,               *)
+(* fdecl_binders_unique, and program_binders_unique).                *)
 (* ================================================================= *)
 
 Definition subst_expr_case
@@ -860,7 +863,7 @@ Proof.
     subst G. simpl.
     destruct
       (existsb
-         (fun b : term_binding =>
+         (fun b : term_var * ty =>
             if term_var_eq_dec z (fst b) then true else false)
          binds) eqn:Hbinds; simpl.
     + replace
@@ -943,7 +946,7 @@ Qed.
 Lemma progress_gen :
   forall FDs DI G Sigma C A N A2 N2 e Tl,
     has_type FDs DI G Sigma C A N A2 N2 e Tl ->
-    G = @nil term_binding ->
+    G = @nil (term_var * ty) ->
     forall M St,
     store_wf DI Sigma C A N M St ->
     di_functional DI ->

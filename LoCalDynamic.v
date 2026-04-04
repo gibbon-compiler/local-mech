@@ -70,26 +70,6 @@ Definition heap_lookup (S : store) (r : region_var) (i : nat) : option datacon :
   | None => None
   end.
 
-(* DI(K) — look up constructor info by name. *)
-Fixpoint lookup_datacon (DI : datacon_info) (K : datacon)
-    : option (tycon * list tycon) :=
-  match DI with
-  | nil => None
-  | (K', info) :: DI' =>
-      if datacon_eq_dec K K' then Some info else lookup_datacon DI' K
-  end.
-
-(* Function(f) — look up a function declaration by name. *)
-Fixpoint lookup_fdecl (FDs : list fdecl) (f : fun_var) : option fdecl :=
-  match FDs with
-  | nil => None
-  | fd :: FDs' =>
-      match fd with
-      | FunDecl f' _ _ _ _ _ =>
-          if fun_var_eq_dec f f' then Some fd else lookup_fdecl FDs' f
-      end
-  end.
-
 (* ================================================================= *)
 (* Update operations                                                 *)
 (* ================================================================= *)
@@ -124,6 +104,12 @@ Definition is_val (e : expr) : bool :=
 
 (* ================================================================= *)
 (* Term-variable substitution  (e[v/x])                              *)
+(*                                                                    *)
+(* This is the direct named-variable substitution used by the current *)
+(* mechanization. It matches the thesis on already-uniquified source  *)
+(* terms, i.e. when the binder-uniqueness convention from             *)
+(* LoCalSyntax is maintained. Outside that regime, open-value         *)
+(* substitution would need explicit freshening.                       *)
 (* ================================================================= *)
 
 (* Substitute value s for term variable x in a value. *)
@@ -195,7 +181,7 @@ Definition subst_loc_in_locexp
 Definition subst_loc_in_ty
     (lo : loc_var) (ro : region_var)
     (ln : loc_var) (rn : region_var)
-    (t : located_type) : located_type :=
+    (t : ty) : ty :=
   match t with
   | loc_ty T l r => loc_ty T (subst_lvar lo ln l) (subst_rvar ro rn r)
   end.
@@ -219,7 +205,7 @@ Definition subst_loc_in_laddr
 Definition subst_loc_in_bind
     (lo : loc_var) (ro : region_var)
     (ln : loc_var) (rn : region_var)
-    (b : term_binding) : term_binding :=
+    (b : term_var * ty) : term_var * ty :=
   (fst b, subst_loc_in_ty lo ro ln rn (snd b)).
 
 (* Substitute location l_new^r_new for l_old^r_old throughout
@@ -268,6 +254,54 @@ Fixpoint subst_locs
       subst_locs fs as_ (subst_loc lo ro ln rn e)
   | _, _ => e
   end.
+
+Definition val_term_vars (v0 : val) : list term_var :=
+  match v0 with
+  | v_var x => [x]
+  | v_cloc _ _ _ _ => nil
+  end.
+
+Definition val_symbolic_laddrs (v0 : val) : list laddr :=
+  match v0 with
+  | v_var _ => nil
+  | v_cloc _ _ l r => [(l, r)]
+  end.
+
+Definition val_symbolic_regions (v0 : val) : list region_var :=
+  match v0 with
+  | v_var _ => nil
+  | v_cloc _ _ _ r => [r]
+  end.
+
+Definition vals_term_vars (vs : list val) : list term_var :=
+  flat_map val_term_vars vs.
+
+Definition vals_symbolic_laddrs (vs : list val) : list laddr :=
+  flat_map val_symbolic_laddrs vs.
+
+Definition vals_symbolic_regions (vs : list val) : list region_var :=
+  flat_map val_symbolic_regions vs.
+
+Definition loc_arg_regions (loc_args : list laddr) : list region_var :=
+  List.map snd loc_args.
+
+(* Freshen(FD) in the thesis packages exactly this no-capture side
+   condition for D_App: actual term/location/region names must be
+   disjoint from binders internal to the callee body before we apply
+   the named substitutions below. *)
+Definition app_subst_fresh
+    (body : expr) (loc_args : list laddr) (val_args : list val) : Prop :=
+  (forall x,
+      In x (vals_term_vars val_args) ->
+      ~ In x (expr_bound_term_vars body))
+  /\
+  (forall lr,
+      In lr (loc_args ++ vals_symbolic_laddrs val_args) ->
+      ~ In lr (expr_bound_laddrs body))
+  /\
+  (forall r,
+      In r (loc_arg_regions loc_args ++ vals_symbolic_regions val_args) ->
+      ~ In r (expr_bound_regions body)).
 
 (* ================================================================= *)
 (* End-witness relation  (thesis §2.2.2 and Appendix §end-witness)   *)
@@ -339,9 +373,10 @@ Inductive field_starts :
    Each binding (x, T@l^r) at field start index i in region rc
    becomes value ⟨rc, i⟩^(l^r). *)
 Fixpoint build_cloc_vals (rc : region_var)
-    (binds : list term_binding) (indices : list nat) : list val :=
+    (binds : list (term_var * ty)) (indices : list nat) : list val :=
   match binds, indices with
-  | (_, loc_ty _ l r) :: binds', i :: indices' =>
+  | bind :: binds', i :: indices' =>
+      let '(l, r) := bind_laddr bind in
       v_cloc rc i l r :: build_cloc_vals rc binds' indices'
   | _, _ => nil
   end.
@@ -350,10 +385,11 @@ Fixpoint build_cloc_vals (rc : region_var)
    Each binding (_, T@l^r) at field start index i in region rc
    adds mapping (l,r) ↦ (rc, i). *)
 Fixpoint extend_loc_fields (M : loc_map) (rc : region_var)
-    (binds : list term_binding) (indices : list nat) : loc_map :=
+    (binds : list (term_var * ty)) (indices : list nat) : loc_map :=
   match binds, indices with
-  | (_, loc_ty _ l r) :: binds', i :: indices' =>
-      extend_loc_fields (extend_loc M (l, r) (rc, i)) rc binds' indices'
+  | bind :: binds', i :: indices' =>
+      extend_loc_fields (extend_loc M (bind_laddr bind) (rc, i))
+                        rc binds' indices'
   | _, _ => M
   end.
 
@@ -432,7 +468,10 @@ Inductive step :
      S; M; f [l₁^r₁,...] v₁...vₘ
        ⇒  S; M; e[x₁...xₘ := v₁...vₘ][l'₁^r'₁... := l₁^r₁...]
      where  FD = Function(f),
-            (f x₁...xₘ = e) = Freshen(FD) — freshening omitted *)
+            (f x₁...xₘ = e) = Freshen(FD).
+     In this named-syntax development we use the already-uniquified
+     presentation of the rule; app_subst_fresh names the local
+     no-capture obligation that Freshen(FD) discharges in the thesis. *)
   | D_App : forall FDs DI S M f loc_args val_args
                    f_locs f_named_params f_retty f_regions f_body,
       lookup_fdecl FDs f =

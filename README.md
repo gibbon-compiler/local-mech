@@ -25,7 +25,9 @@ The repository contains four mechanization modules (in dependency order):
   - runtime structures: store, location map, concrete addresses,
   - the `step` relation (`S ; M ; e ⇒ S' ; M' ; e'`),
   - multi-step closure (`multi_step`),
-  - auxiliary definitions: substitution, `end_witness`, `field_starts`.
+  - auxiliary definitions: substitution, `end_witness`, `field_starts`,
+  - binder-uniqueness and freshness helpers that make the thesis's
+    implicit `Freshen`/uniquify discipline explicit for the named syntax.
 
 - `LoCalSafety.v` — type safety (thesis §2.2.3 and Appendix A), including:
   - store well-formedness (`store_wf`), covering map-store consistency, constructor-application well-formedness, and allocation well-formedness,

@@ -5,6 +5,7 @@ From Stdlib Require Import Init.Nat.
 From Stdlib Require Import List.
 Import ListNotations.
 Open Scope string_scope.
+Open Scope list_scope.
 
 Module LoCalSyntax.
 
@@ -31,18 +32,12 @@ Inductive loc_exp : Type :=
 Inductive ty : Type :=
   | loc_ty : tycon -> loc_var -> region_var -> ty.
 
-(* The thesis writes types as T @ l^r; we expose that terminology here so
-   every module shares the same surface vocabulary. *)
-Definition located_type : Type := ty.
-Notation LocTy := loc_ty.
-Definition term_binding : Type := (term_var * located_type)%type.
-
 Inductive val : Type :=
   | v_var : term_var -> val
   | v_cloc : region_var -> nat -> loc_var -> region_var -> val.
 
 Inductive pat : Type :=
-  | pat_clause : datacon -> list term_binding -> expr -> pat
+  | pat_clause : datacon -> list (term_var * ty) -> expr -> pat
 with expr : Type :=
   | e_val : val -> expr
   | e_app : fun_var -> list (loc_var * region_var) -> list val -> expr
@@ -58,8 +53,8 @@ Inductive datatype_decl : Type :=
 Inductive fdecl : Type :=
   | FunDecl : fun_var
               -> list (loc_var * region_var)   (* location params  *)
-              -> list term_binding             (* named value params *)
-              -> located_type                  (* return type *)
+              -> list (term_var * ty)          (* named value params *)
+              -> ty                            (* return type *)
               -> list region_var               (* region params *)
               -> expr                          (* body *)
               -> fdecl.
@@ -99,6 +94,28 @@ Proof. decide equality; [apply region_var_eq_dec | apply loc_var_eq_dec]. Define
 
 (* Datacon info: maps constructor names to (result tycon, field tycons). *)
 Definition datacon_info : Type := list (datacon * (tycon * list tycon)).
+
+(* Shared finite-map lookups for the global LoCal contexts.
+   These are used by both the typing and dynamic developments, so they
+   live in the common syntax/context layer rather than in LoCalDynamic. *)
+
+Fixpoint lookup_datacon (DI : datacon_info) (K : datacon)
+    : option (tycon * list tycon) :=
+  match DI with
+  | nil => None
+  | (K', info) :: DI' =>
+      if datacon_eq_dec K K' then Some info else lookup_datacon DI' K
+  end.
+
+Fixpoint lookup_fdecl (FDs : list fdecl) (f : fun_var) : option fdecl :=
+  match FDs with
+  | nil => None
+  | fd :: FDs' =>
+      match fd with
+      | FunDecl f' _ _ _ _ _ =>
+          if fun_var_eq_dec f f' then Some fd else lookup_fdecl FDs' f
+      end
+  end.
 
 Declare Custom Entry local_ty.
 Declare Custom Entry local_val.
@@ -158,10 +175,136 @@ Definition ex_tree_case : expr :=
 
 (* Helpers on pattern bindings — used by both typing and dynamic rules. *)
 
-Definition pat_field_tycons (binds : list term_binding) : list tycon :=
-  List.map (fun '(_, loc_ty T _ _) => T) binds.
+Definition bind_tycon (b : term_var * ty) : tycon :=
+  match snd b with
+  | loc_ty T _ _ => T
+  end.
 
-Definition pat_term_vars (binds : list term_binding) : list term_var :=
+Definition bind_laddr (b : term_var * ty) : laddr :=
+  match snd b with
+  | loc_ty _ l r => (l, r)
+  end.
+
+Definition bind_store_entry (b : term_var * ty) : laddr * tycon :=
+  (bind_laddr b, bind_tycon b).
+
+Definition pat_field_tycons (binds : list (term_var * ty)) : list tycon :=
+  List.map bind_tycon binds.
+
+Definition pat_term_vars (binds : list (term_var * ty)) : list term_var :=
   List.map fst binds.
+
+Definition pat_laddrs (binds : list (term_var * ty)) : list laddr :=
+  List.map bind_laddr binds.
+
+Definition pat_store_entries (binds : list (term_var * ty))
+    : list (laddr * tycon) :=
+  List.map bind_store_entry binds.
+
+(* The thesis assumes an implicit uniquify discipline:
+   all binders for values, locations, and regions are distinct.
+   We expose the corresponding binder collections here so the rest of the
+   mechanization can state that invariant explicitly when needed. *)
+
+Fixpoint pat_bound_term_vars (p : pat) : list term_var :=
+  match p with
+  | pat_clause _ binds body => pat_term_vars binds ++ expr_bound_term_vars body
+  end
+
+with expr_bound_term_vars (e : expr) : list term_var :=
+  match e with
+  | e_val _ => nil
+  | e_app _ _ _ => nil
+  | e_datacon _ _ _ _ => nil
+  | e_let x _ e1 e2 =>
+      expr_bound_term_vars e1 ++ x :: expr_bound_term_vars e2
+  | e_letloc _ _ _ body => expr_bound_term_vars body
+  | e_letregion _ body => expr_bound_term_vars body
+  | e_case _ pats =>
+      let fix go (ps : list pat) : list term_var :=
+        match ps with
+        | nil => nil
+        | p :: ps' => pat_bound_term_vars p ++ go ps'
+        end
+      in go pats
+  end.
+
+Fixpoint pat_bound_laddrs (p : pat) : list laddr :=
+  match p with
+  | pat_clause _ binds body => pat_laddrs binds ++ expr_bound_laddrs body
+  end
+
+with expr_bound_laddrs (e : expr) : list laddr :=
+  match e with
+  | e_val _ => nil
+  | e_app _ _ _ => nil
+  | e_datacon _ _ _ _ => nil
+  | e_let _ _ e1 e2 =>
+      expr_bound_laddrs e1 ++ expr_bound_laddrs e2
+  | e_letloc l r _ body => (l, r) :: expr_bound_laddrs body
+  | e_letregion _ body => expr_bound_laddrs body
+  | e_case _ pats =>
+      let fix go (ps : list pat) : list laddr :=
+        match ps with
+        | nil => nil
+        | p :: ps' => pat_bound_laddrs p ++ go ps'
+        end
+      in go pats
+  end.
+
+Fixpoint pat_bound_regions (p : pat) : list region_var :=
+  match p with
+  | pat_clause _ _ body => expr_bound_regions body
+  end
+
+with expr_bound_regions (e : expr) : list region_var :=
+  match e with
+  | e_val _ => nil
+  | e_app _ _ _ => nil
+  | e_datacon _ _ _ _ => nil
+  | e_let _ _ e1 e2 =>
+      expr_bound_regions e1 ++ expr_bound_regions e2
+  | e_letloc _ _ _ body => expr_bound_regions body
+  | e_letregion r body => r :: expr_bound_regions body
+  | e_case _ pats =>
+      let fix go (ps : list pat) : list region_var :=
+        match ps with
+        | nil => nil
+        | p :: ps' => pat_bound_regions p ++ go ps'
+        end
+      in go pats
+  end.
+
+Definition expr_binders_unique (e : expr) : Prop :=
+  NoDup (expr_bound_term_vars e)
+  /\ NoDup (expr_bound_laddrs e)
+  /\ NoDup (expr_bound_regions e).
+
+Definition fdecl_bound_term_vars (fd : fdecl) : list term_var :=
+  match fd with
+  | FunDecl _ _ named_args _ _ body =>
+      List.map fst named_args ++ expr_bound_term_vars body
+  end.
+
+Definition fdecl_bound_laddrs (fd : fdecl) : list laddr :=
+  match fd with
+  | FunDecl _ locs _ _ _ body =>
+      locs ++ expr_bound_laddrs body
+  end.
+
+Definition fdecl_bound_regions (fd : fdecl) : list region_var :=
+  match fd with
+  | FunDecl _ _ _ _ regions body =>
+      regions ++ expr_bound_regions body
+  end.
+
+Definition fdecl_binders_unique (fd : fdecl) : Prop :=
+  NoDup (fdecl_bound_term_vars fd)
+  /\ NoDup (fdecl_bound_laddrs fd)
+  /\ NoDup (fdecl_bound_regions fd).
+
+Definition program_binders_unique (p : program) : Prop :=
+  Forall fdecl_binders_unique (prog_fdecls p)
+  /\ expr_binders_unique (prog_main p).
 
 End LoCalSyntax.

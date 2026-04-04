@@ -12,26 +12,22 @@ Module LoCalStatic.
 (* Environment types and helpers for the LoCal type system (§2.2.1). *)
 (* ================================================================= *)
 
+(* Shorthand for the only type former. *)
+Definition located_type : Type := ty.
+Notation LocTy := loc_ty.
 Notation ELet := e_let.
 
 (* ---- Environments in the judgment  Γ; Σ; C; A; N ⊢ A'; N'; e : τ ---- *)
-(* Each environment is represented as a left-biased finite-map encoding,
-   matching the thesis environments Γ, Σ, C, A, and N. *)
 
-Definition store_entry : Type := (laddr * tycon)%type.
-Definition conloc_entry : Type := (laddr * loc_exp)%type.
-
-Definition type_env    : Type := list term_binding. (* Γ *)
-Definition store_type  : Type := list store_entry.  (* Σ *)
-Definition conloc_env  : Type := list conloc_entry. (* C *)
+Definition type_env    : Type := list (term_var * located_type). (* Γ *)
+Definition store_type  : Type := list (laddr * tycon).           (* Σ *)
+Definition conloc_env  : Type := list (laddr * loc_exp).         (* C *)
 
 Inductive alloc_ptr : Type :=
   | AP_None
   | AP_Loc : laddr -> alloc_ptr.
 
-Definition alloc_entry : Type := (region_var * alloc_ptr)%type.
-
-Definition alloc_env   : Type := list alloc_entry.               (* A *)
+Definition alloc_env   : Type := list (region_var * alloc_ptr).  (* A *)
 Definition nursery     : Type := list laddr.                     (* N *)
 
 (* ---- Global contexts (not threaded through the judgment) ---- *)
@@ -68,25 +64,14 @@ Definition remove_nursery (N0 : nursery) (lr : laddr) : nursery :=
   filter (fun x => if laddr_eq_dec x lr then false else true) N0.
 
 (* Extend type_env with a list of bindings (for pattern branches). *)
-Fixpoint extend_tenv_list (G : type_env) (binds : list term_binding)
+Fixpoint extend_tenv_list (G : type_env) (binds : list (term_var * located_type))
   : type_env :=
   match binds with
   | nil => G
   | cons bnd rest => extend_tenv_list (cons bnd G) rest
   end.
 
-(* Extract store-type entries from pattern bindings:
-   (x, T@l^r) ↦ ((l,r), T). *)
-Definition bind_to_store_entry (b : term_binding) : store_entry :=
-  match snd b with
-  | loc_ty tc lv rv => ((lv, rv), tc)
-  end.
-
-Definition binds_to_store_entries (binds : list term_binding)
-  : list store_entry :=
-  map bind_to_store_entry binds.
-
-Fixpoint extend_store_list (S0 : store_type) (entries : list store_entry)
+Fixpoint extend_store_list (S0 : store_type) (entries : list (laddr * tycon))
   : store_type :=
   match entries with
   | nil => S0
@@ -94,11 +79,11 @@ Fixpoint extend_store_list (S0 : store_type) (entries : list store_entry)
   end.
 
 (* Construct initial Γ and Σ from a parameter list (for T-FunctionDef). *)
-Definition params_to_tenv (params : list term_binding)
+Definition params_to_tenv (params : list (term_var * located_type))
   : type_env := params.
 
-Definition params_to_store (params : list term_binding)
-  : store_type := map bind_to_store_entry params.
+Definition params_to_store (params : list (term_var * located_type))
+  : store_type := map bind_store_entry params.
 
 (* Pattern coverage: every constructor of type tc in DI has a pattern. *)
 Definition pats_cover (DI : datacon_info) (tc : tycon) (pats : list pat) : Prop :=
@@ -325,7 +310,7 @@ with pat_has_type :
         In ((l, r), tc_res) S0 ->
         has_type FDs DI
                  (extend_tenv_list G binds)
-                 (extend_store_list S0 (binds_to_store_entries binds))
+                 (extend_store_list S0 (pat_store_entries binds))
                  C A N A' N' body (LocTy tc_res l r) ->
         pat_has_type FDs DI tc_s G S0 C A N A' N'
                      (LocTy tc_res l r) (pat_clause dc binds body)
@@ -355,7 +340,7 @@ with pats_have_type :
    [+ location-param correspondence — see thesis] *)
 Inductive fdecl_has_type : fun_env -> datacon_info -> fdecl -> Prop :=
   | T_FunctionDef :
-      forall FDs DI f locs (named_args : list term_binding) out regions body
+      forall FDs DI f locs (named_args : list (term_var * ty)) out regions body
              N' tc_out l_out r_out,
         In (FunDecl f locs named_args out regions body) FDs ->
         out = LocTy tc_out l_out r_out ->
