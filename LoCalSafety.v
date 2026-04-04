@@ -11,6 +11,7 @@ Import ListNotations.
 From Stdlib Require Import Strings.String.
 From Stdlib Require Import PeanoNat.
 From Stdlib Require Import Lia.
+From Stdlib Require Import Program.Equality.
 From LocalMech Require Import LoCalSyntax.
 From LocalMech Require Import LoCalStatic.
 From LocalMech Require Import LoCalDynamic.
@@ -186,6 +187,19 @@ Definition store_wf
     In (l, r) N ->
     ~ exists T, In ((l, r), T) Sigma).
 
+Definition nursery_locmap_injective
+    (N : nursery)
+    (M : loc_map) : Prop :=
+  (* Thesis gap: symbolic freshness of letloc binders does not by itself
+     prevent two live nursery locations from denoting the same concrete
+     cell.  D_DataCon needs this stronger semantic freshness property. *)
+  forall lr1 lr2 cl,
+    In lr1 N ->
+    In lr2 N ->
+    lookup_loc M lr1 = Some cl ->
+    lookup_loc M lr2 = Some cl ->
+    lr1 = lr2.
+
 (* ================================================================= *)
 (* In_lookup_fdecl: membership in the function list implies lookup    *)
 (* succeeds (needed to bridge typing's In-premise with step's        *)
@@ -207,6 +221,7 @@ Proof.
       * inversion Heq; subst. congruence.
       * eapply IH. exact Hin.
 Qed.
+
 
 (* ================================================================= *)
 (* Additional invariants needed for progress                          *)
@@ -332,6 +347,21 @@ Proof.
   intros FDs DI G Sigma C A N Aout Nout x tc1 l1 r1 e1 e2 Ty Hty.
   inversion Hty; subst. eauto.
 Qed.
+
+Lemma has_type_datacon_inv :
+  forall FDs DI G Sigma C A N Aout Nout dc l r vs Ty,
+    has_type FDs DI G Sigma C A N Aout Nout (e_datacon dc l r vs) Ty ->
+    exists tc fieldtcs fields,
+      Ty = LocTy tc l r /\
+      Aout = extend_alloc A r (AP_Loc (l, r)) /\
+      Nout = remove_nursery N (l, r) /\
+      lookup_datacon DI dc = Some (tc, fieldtcs) /\
+      In (l, r) N /\
+      map snd fields = fieldtcs /\
+      constructor_layout C l r None fields /\
+      In (r, AP_Loc (constructor_focus_loc l fields, r)) A /\
+      field_vals_have_type FDs DI G Sigma C A N r vs fields.
+Admitted.
 
 Definition tenv_equiv (G1 G2 : type_env) : Prop :=
   forall x, lookup_tenv G1 x = lookup_tenv G2 x.
@@ -487,6 +517,66 @@ Proof.
   split.
   - intro Heq. apply Hnin. simpl. left. symmetry. exact Heq.
   - intro Hin. apply Hnin. simpl. right. exact Hin.
+Qed.
+
+Lemma in_remove_nursery_inv :
+  forall N lr lr',
+    In lr' (remove_nursery N lr) ->
+    In lr' N /\ lr' <> lr.
+Proof.
+  induction N as [| a N IH]; intros lr lr' Hin; simpl in Hin.
+  - contradiction.
+  - destruct (laddr_eq_dec a lr).
+    + destruct (IH _ _ Hin) as [HinN Hneq].
+      split.
+      * right. exact HinN.
+      * exact Hneq.
+    + destruct Hin as [Heq | Hin].
+      * inversion Heq; subst.
+        split.
+        -- left. reflexivity.
+        -- exact n.
+      * destruct (IH _ _ Hin) as [HinN Hneq].
+        split.
+        -- right. exact HinN.
+        -- exact Hneq.
+Qed.
+
+Lemma in_remove_nursery_preserved :
+  forall N lr lr',
+    In lr' N ->
+    lr' <> lr ->
+    In lr' (remove_nursery N lr).
+Proof.
+  induction N as [| a N IH]; intros lr lr' Hin Hneq; simpl in *.
+  - contradiction.
+  - destruct Hin as [Heq | Hin].
+    + subst a.
+      destruct (laddr_eq_dec lr' lr); [contradiction|].
+      left. reflexivity.
+    + destruct (laddr_eq_dec a lr).
+      * apply IH; assumption.
+      * right. apply IH; assumption.
+Qed.
+
+Lemma not_in_remove_nursery_preserved :
+  forall N lr lr',
+    lr' <> lr ->
+    ~ In lr' (remove_nursery N lr) ->
+    ~ In lr' N.
+Proof.
+  intros N lr lr' Hneq Hnin Hin.
+  apply Hnin.
+  eapply in_remove_nursery_preserved; eauto.
+Qed.
+
+Lemma not_in_remove_nursery_self :
+  forall N lr,
+    ~ In lr (remove_nursery N lr).
+Proof.
+  intros N lr Hin.
+  destruct (in_remove_nursery_inv _ _ _ Hin) as [_ Hneq].
+  contradiction.
 Qed.
 
 Lemma fresh_region_store_absent :
@@ -674,6 +764,15 @@ Lemma has_type_value_same_io :
 Proof.
   intros FDs DI G Sigma C A N A' N' vl T Hty.
   inversion Hty; subst; auto.
+Qed.
+
+Lemma value_typing_store_entry :
+  forall FDs DI G Sigma C A N A' N' vl tc l r,
+    has_type FDs DI G Sigma C A N A' N' (e_val vl) (LocTy tc l r) ->
+    In ((l, r), tc) Sigma.
+Proof.
+  intros FDs DI G Sigma C A N A' N' vl tc l r Hty.
+  inversion Hty; subst; assumption.
 Qed.
 
 Lemma typed_value_nil_no_term_vars :
@@ -896,6 +995,517 @@ Proof.
   intros M lr1 lr2 cl Hneq.
   unfold extend_loc. simpl.
   destruct (laddr_eq_dec lr1 lr2); congruence.
+Qed.
+
+Lemma heap_find_heap_write_eq :
+  forall h i K,
+    heap_find (heap_write h i K) i = Some K.
+Proof.
+  intros h i K. simpl. rewrite Nat.eqb_refl. reflexivity.
+Qed.
+
+Lemma heap_find_heap_write_neq :
+  forall h i j K,
+    j <> i ->
+    heap_find (heap_write h i K) j = heap_find h j.
+Proof.
+  intros h i j K Hneq. simpl.
+  destruct (Nat.eqb j i) eqn:Heq.
+  - apply Nat.eqb_eq in Heq. contradiction.
+  - reflexivity.
+Qed.
+
+Lemma heap_lookup_store_write_eq :
+  forall S r i K,
+    heap_lookup (store_write S r i K) r i = Some K.
+Proof.
+  induction S as [| [r' h] S IH]; intros r i K; simpl.
+  - destruct (region_var_eq_dec r r); [| contradiction].
+    unfold heap_lookup. simpl.
+    destruct (region_var_eq_dec r r); [| contradiction].
+    simpl. rewrite Nat.eqb_refl. reflexivity.
+  - destruct (region_var_eq_dec r r').
+    + subst. destruct (region_var_eq_dec r' r'); [| contradiction].
+      unfold heap_lookup. simpl.
+      destruct (region_var_eq_dec r' r'); [| contradiction].
+      apply heap_find_heap_write_eq.
+    + destruct (region_var_eq_dec r r'); [contradiction|].
+      unfold heap_lookup. simpl.
+      destruct (region_var_eq_dec r r'); [contradiction|].
+      apply IH.
+Qed.
+
+Lemma heap_lookup_store_write_neq :
+  forall S r i K r0 j,
+    (r0, j) <> (r, i) ->
+    heap_lookup (store_write S r i K) r0 j = heap_lookup S r0 j.
+Proof.
+  induction S as [| [r' h] S IH]; intros r i K r0 j Hneq; simpl.
+  - destruct (region_var_eq_dec r0 r) as [Heq_r | Hneq_r].
+    + subst r0.
+      assert (Hneq_i : j <> i).
+      { intro Heq_i. apply Hneq. now subst. }
+      unfold heap_lookup. simpl.
+      destruct (region_var_eq_dec r r); [| contradiction].
+      simpl. destruct (Nat.eqb j i) eqn:Heq.
+      * apply Nat.eqb_eq in Heq. contradiction.
+      * reflexivity.
+    + unfold heap_lookup. simpl.
+      destruct (region_var_eq_dec r0 r); [contradiction| reflexivity].
+  - destruct (region_var_eq_dec r r') as [Heq_w | Hneq_w].
+    + subst r'.
+      destruct (region_var_eq_dec r0 r) as [Heq_r0 | Hneq_r0].
+      * subst r0.
+        assert (Hneq_i : j <> i).
+        { intro Heq_i. apply Hneq. now subst. }
+        unfold heap_lookup. simpl.
+        destruct (region_var_eq_dec r r); [| contradiction].
+        simpl. apply heap_find_heap_write_neq. exact Hneq_i.
+      * unfold heap_lookup. simpl.
+        destruct (region_var_eq_dec r0 r); [contradiction| reflexivity].
+    + destruct (region_var_eq_dec r0 r') as [Heq_r0 | Hneq_r0].
+      * subst r0. unfold heap_lookup. simpl.
+        destruct (region_var_eq_dec r' r'); [reflexivity| contradiction].
+      * destruct (region_var_eq_dec r0 r'); [contradiction|].
+        unfold heap_lookup. simpl.
+        destruct (region_var_eq_dec r0 r'); [contradiction|].
+        apply IH. exact Hneq.
+Qed.
+
+Lemma store_find_heap_store_write_other :
+  forall S r i K r0,
+    r0 <> r ->
+    store_find_heap (store_write S r i K) r0 = store_find_heap S r0.
+Proof.
+  induction S as [| [r' h] S IH]; intros r i K r0 Hneq; simpl.
+  - destruct (region_var_eq_dec r0 r); [contradiction| reflexivity].
+  - destruct (region_var_eq_dec r r') as [Heq_w | Hneq_w].
+    + subst r'. simpl. destruct (region_var_eq_dec r0 r); [contradiction| reflexivity].
+    + destruct (region_var_eq_dec r0 r') as [Heq_r0 | Hneq_r0].
+      * subst r0. simpl. destruct (region_var_eq_dec r' r'); [reflexivity| contradiction].
+      * simpl. destruct (region_var_eq_dec r0 r'); [contradiction|].
+        rewrite IH by exact Hneq. reflexivity.
+Qed.
+
+Lemma allocptr_store_write_same :
+  forall S r i K,
+    allocptr (store_write S r i K) r =
+    match allocptr S r with
+    | None => Some i
+    | Some k => Some (Nat.max i k)
+    end.
+Proof.
+  induction S as [| [r' h] S IH]; intros r i K; simpl.
+  - unfold allocptr. simpl.
+    destruct (region_var_eq_dec r r); [reflexivity| contradiction].
+  - destruct (region_var_eq_dec r r').
+    + subst. unfold allocptr. simpl.
+      destruct (region_var_eq_dec r' r'); [reflexivity| contradiction].
+    + destruct (region_var_eq_dec r r'); [contradiction|].
+      unfold allocptr. simpl.
+      destruct (region_var_eq_dec r r'); [contradiction|].
+      apply IH.
+Qed.
+
+Lemma allocptr_store_write_other :
+  forall S r i K r0,
+    r0 <> r ->
+    allocptr (store_write S r i K) r0 = allocptr S r0.
+Proof.
+  intros S r i K r0 Hneq.
+  unfold allocptr.
+  now rewrite store_find_heap_store_write_other by exact Hneq.
+Qed.
+
+Lemma gt_allocptr_store_write_same :
+  forall S r i K j,
+    gt_allocptr j (allocptr S r) ->
+    j > i ->
+    gt_allocptr j (allocptr (store_write S r i K) r).
+Proof.
+  intros S r i K j Hgt Hij.
+  rewrite allocptr_store_write_same.
+  destruct (allocptr S r) as [k|] eqn:Hap; simpl in *.
+  - lia.
+  - lia.
+Qed.
+
+Scheme end_witness_ind' := Induction for end_witness Sort Prop
+with end_witness_fields_ind' := Induction for end_witness_fields Sort Prop.
+
+Combined Scheme end_witness_mutind
+  from end_witness_ind', end_witness_fields_ind'.
+
+Lemma end_witness_functional_mutual :
+  (forall DI S cl tc cl1,
+      end_witness DI S cl tc cl1 ->
+      forall cl2, end_witness DI S cl tc cl2 -> cl1 = cl2)
+  /\
+  (forall DI S r i Ts j1,
+      end_witness_fields DI S r i Ts j1 ->
+      forall j2, end_witness_fields DI S r i Ts j2 -> j1 = j2).
+Proof.
+  eapply end_witness_mutind.
+  - intros DI S r i_s K tyc fieldtys j Hheap Hdc Hfields IHfields cl2 H2.
+    inversion H2 as [DI' S' r' i_s' K' tyc' fieldtys' j2 Hheap2 Hdc2 Hfields2]; subst.
+    assert (K' = K).
+    { rewrite Hheap in Hheap2. inversion Hheap2. reflexivity. }
+    subst K'.
+    rewrite Hdc in Hdc2. inversion Hdc2; subst.
+    specialize (IHfields _ Hfields2). subst. reflexivity.
+  - intros DI S r i j2 H2.
+    inversion H2. reflexivity.
+  - intros DI S r i T Ts j k Hew IHew Hews IHews k2 H2.
+    inversion H2 as [| DI' S' r' i' T' Ts' j2 k3 Hew2 Hews2]; subst.
+    specialize (IHew _ Hew2).
+    inversion IHew; subst.
+    specialize (IHews _ Hews2). subst.
+    reflexivity.
+Qed.
+
+Corollary end_witness_functional :
+  forall DI S cl tc cl1 cl2,
+    end_witness DI S cl tc cl1 ->
+    end_witness DI S cl tc cl2 ->
+    cl1 = cl2.
+Proof.
+  intros DI S cl tc cl1 cl2 H1 H2.
+  destruct end_witness_functional_mutual as [H _].
+  eauto.
+Qed.
+
+Corollary end_witness_fields_functional :
+  forall DI S r i Ts j1 j2,
+    end_witness_fields DI S r i Ts j1 ->
+    end_witness_fields DI S r i Ts j2 ->
+    j1 = j2.
+Proof.
+  intros DI S r i Ts j1 j2 H1 H2.
+  destruct end_witness_functional_mutual as [_ H].
+  eauto.
+Qed.
+
+Lemma end_witness_store_write_fresh_mutual :
+  (forall DI S cl tc cl',
+      end_witness DI S cl tc cl' ->
+      forall r i K,
+        heap_lookup S r i = None ->
+        end_witness DI (store_write S r i K) cl tc cl')
+  /\
+  (forall DI S r0 i0 Ts j,
+      end_witness_fields DI S r0 i0 Ts j ->
+      forall r i K,
+        heap_lookup S r i = None ->
+        end_witness_fields DI (store_write S r i K) r0 i0 Ts j).
+Proof.
+  eapply end_witness_mutind.
+  - intros DI S r0 i_s K0 tyc fieldtys j Hheap Hdc Hfields IH r i K Hnone.
+    econstructor.
+    + rewrite heap_lookup_store_write_neq.
+      * exact Hheap.
+      * intro Heq. inversion Heq; subst. rewrite Hheap in Hnone. discriminate.
+    + exact Hdc.
+    + eapply IH. exact Hnone.
+  - intros DI S r0 i0 r i K Hnone. constructor.
+  - intros DI S r0 i0 T Ts j k Hew IHew Hews IHews r i K Hnone.
+    econstructor.
+    + eapply IHew. exact Hnone.
+    + eapply IHews. exact Hnone.
+Qed.
+
+Corollary end_witness_store_write_fresh :
+  forall DI S cl tc cl' r i K,
+    end_witness DI S cl tc cl' ->
+    heap_lookup S r i = None ->
+    end_witness DI (store_write S r i K) cl tc cl'.
+Proof.
+  intros DI S cl tc cl' r i K Hew Hnone.
+  destruct end_witness_store_write_fresh_mutual as [H _].
+  eauto.
+Qed.
+
+Corollary end_witness_fields_store_write_fresh :
+  forall DI S r0 i0 Ts j r i K,
+    end_witness_fields DI S r0 i0 Ts j ->
+    heap_lookup S r i = None ->
+    end_witness_fields DI (store_write S r i K) r0 i0 Ts j.
+Proof.
+  intros DI S r0 i0 Ts j r i K Hew Hnone.
+  destruct end_witness_store_write_fresh_mutual as [_ H].
+  eauto.
+Qed.
+
+Lemma end_witness_gt :
+  forall DI S r i T j,
+    end_witness DI S (r, i) T (r, j) ->
+    j > i
+with end_witness_fields_ge :
+  forall DI S r i Ts j,
+    end_witness_fields DI S r i Ts j ->
+    j >= i.
+Proof.
+  - intros DI S r i T j Hew.
+    inversion Hew; subst.
+    match goal with
+    | [ Hf : end_witness_fields _ _ _ _ _ _ |- _ ] =>
+        pose proof (end_witness_fields_ge _ _ _ _ _ _ Hf) as Hge;
+        lia
+    end.
+  - intros DI S r i Ts j Hfields.
+    induction Hfields.
+    + lia.
+    + pose proof (end_witness_gt _ _ _ _ _ _ H) as Hgt.
+      lia.
+Qed.
+
+Lemma end_witness_store_write_other_region :
+  forall DI S r i K r0 j0 T j1,
+    r0 <> r ->
+    end_witness DI (store_write S r i K) (r0, j0) T (r0, j1) ->
+    end_witness DI S (r0, j0) T (r0, j1)
+with end_witness_fields_store_write_other_region :
+  forall DI S r i K r0 j0 Ts j1,
+    r0 <> r ->
+    end_witness_fields DI (store_write S r i K) r0 j0 Ts j1 ->
+    end_witness_fields DI S r0 j0 Ts j1.
+Admitted.
+
+Lemma nonempty_fields_end_gt_allocptr :
+  forall FDs DI G Sigma C A N M S r lf tc vh vs fields start_i,
+    store_wf DI Sigma C A N M S ->
+    lookup_loc M (lf, r) = Some (r, start_i) ->
+    has_type FDs DI G Sigma C A N A N (e_val vh) (LocTy tc lf r) ->
+    constructor_layout C lf r (Some tc) fields ->
+    field_vals_have_type FDs DI G Sigma C A N r vs fields ->
+    In (r, AP_Loc (constructor_focus_loc lf fields, r)) A ->
+    exists j,
+      end_witness_fields DI S r start_i (tc :: map snd fields) j /\
+      gt_allocptr j (allocptr S r).
+Proof.
+  intros FDs DI G Sigma C A N M S r lf tc vh vs fields start_i
+         Hwf Hlookup_head Hty_head Hlayout Hvals.
+  revert lf tc vh start_i Hlookup_head Hty_head Hlayout.
+  induction Hvals as
+      [FDs DI G Sigma C A N r
+      |FDs DI G Sigma C A N r vl fld vs flds Hhead Htail IH];
+    intros lf0 tc0 vh0 start_i Hlookup_head Hty_head Hlayout Hfocus.
+  - destruct Hwf as [Hmap [_ [Halloc [Hdisj1 _]]]].
+    destruct Halloc as [_ [Hlin2 _]].
+    simpl in Hfocus.
+    assert (Hsigma_head : In ((lf0, r), tc0) Sigma).
+    { eapply value_typing_store_entry. exact Hty_head. }
+    destruct (Hmap lf0 r tc0 Hsigma_head) as [i0 [j [Hlk_head Hew_head]]].
+    rewrite Hlookup_head in Hlk_head. inversion Hlk_head; subst i0.
+    exists j. split.
+    + econstructor.
+      * exact Hew_head.
+      * constructor.
+    + eapply Hlin2.
+      * exact Hfocus.
+      * exact Hlookup_head.
+      * intros HinN. eapply Hdisj1; eauto.
+      * exact Hew_head.
+  - destruct fld as [lf1 tc1].
+    simpl in Hlayout.
+    destruct Hlayout as [Hrel Hlayout_tail].
+    pose proof Hwf as Hwf0.
+    destruct Hwf as [_ [Hcfc _]].
+    destruct Hcfc as [_ [_ Hafter]].
+    destruct (Hafter lf1 r tc0 lf0 Hrel)
+      as [i0 [j0 [Hlk_prev [Hew_prev Hlk_next]]]].
+    rewrite Hlookup_head in Hlk_prev. inversion Hlk_prev; subst i0.
+    simpl in Hfocus.
+    destruct (IH Hwf0 lf1 tc1 vl j0 Hlk_next Hhead Hlayout_tail Hfocus)
+      as [j [Hfields Hgt]].
+    exists j. split.
+    + econstructor.
+      * exact Hew_prev.
+      * exact Hfields.
+    + exact Hgt.
+Qed.
+
+Lemma datacon_fields_end_gt_allocptr :
+  forall FDs DI G Sigma C A N M S l r vs fields i,
+    store_wf DI Sigma C A N M S ->
+    lookup_loc M (l, r) = Some (r, i) ->
+    In (l, r) N ->
+    constructor_layout C l r None fields ->
+    field_vals_have_type FDs DI G Sigma C A N r vs fields ->
+    In (r, AP_Loc (constructor_focus_loc l fields, r)) A ->
+    exists j,
+      end_witness_fields DI S r (i + 1) (map snd fields) j /\
+      gt_allocptr j (allocptr S r).
+Proof.
+  intros FDs DI G Sigma C A N M S l r vs fields i
+         Hwf Hlookup_root Hnur Hlayout Hvals Hfocus.
+  destruct fields as [| [lf tc1] fields'].
+  - exists (i + 1). split.
+    + constructor.
+    + destruct Hwf as [_ [_ [Halloc _]]].
+      destruct Halloc as [Hlin1 _].
+      simpl in Hfocus.
+      destruct (Hlin1 r l Hfocus Hnur) as [i0 [Hlk0 Hgt0]].
+      rewrite Hlookup_root in Hlk0. inversion Hlk0; subst i0.
+      destruct (allocptr S r) as [k|] eqn:Hap; simpl in *.
+      * lia.
+      * exact I.
+  - inversion Hvals as
+        [| ? ? ? ? ? ? ? ? vh_head fld_head vs0 flds0 Hhead Htail];
+      subst; clear Hvals.
+    pose proof Hwf as Hwf0.
+    destruct Hwf as [_ [Hcfc _]].
+    destruct Hcfc as [_ [Hnext _]].
+    simpl in Hlayout.
+    destruct Hlayout as [Hrel Hlayout_tail].
+    destruct (Hnext lf r l Hrel) as [i0 [Hlk_root0 Hlk_first]].
+    rewrite Hlookup_root in Hlk_root0. inversion Hlk_root0; subst i0.
+    simpl in Hhead.
+    eapply nonempty_fields_end_gt_allocptr.
+    + exact Hwf0.
+    + exact Hlk_first.
+    + exact Hhead.
+    + exact Hlayout_tail.
+    + exact Htail.
+    + exact Hfocus.
+Qed.
+
+Lemma store_wf_datacon_step :
+  forall FDs DI G Sigma C A N M S dc l r vs tc fieldtcs fields i,
+    store_wf DI Sigma C A N M S ->
+    nursery_locmap_injective N M ->
+    lookup_datacon DI dc = Some (tc, fieldtcs) ->
+    In (l, r) N ->
+    map snd fields = fieldtcs ->
+    constructor_layout C l r None fields ->
+    In (r, AP_Loc (constructor_focus_loc l fields, r)) A ->
+    field_vals_have_type FDs DI G Sigma C A N r vs fields ->
+    lookup_loc M (l, r) = Some (r, i) ->
+    store_wf DI (extend_store Sigma (l, r) tc)
+             C
+             (extend_alloc A r (AP_Loc (l, r)))
+             (remove_nursery N (l, r))
+             M
+             (store_write S r i dc).
+Proof.
+  intros FDs DI G Sigma C A N M S dc l r vs tc fieldtcs fields i
+         Hwf Hninj Hdc Hnur Hfields_eq Hlayout Hfocus Hvals Hlookup.
+  destruct Hwf as [Hmap [Hcfc [Halloc [Hdisj1 Hdisj2]]]].
+  destruct Hcfc as [Hstart [Hnext Hafter]].
+  destruct Halloc as [Hlin1 [Hlin2 [Hwrite [Hempty Htracked]]]].
+  destruct (Hwrite l r Hnur) as [i0 [Hlookup0 Hnone_root]].
+  rewrite Hlookup in Hlookup0. inversion Hlookup0; subst i0.
+  destruct (datacon_fields_end_gt_allocptr
+              FDs DI G Sigma C A N M S l r vs fields i
+              (conj Hmap (conj (conj Hstart (conj Hnext Hafter))
+                               (conj (conj Hlin1 (conj Hlin2 (conj Hwrite (conj Hempty Htracked))))
+                                     (conj Hdisj1 Hdisj2))))
+              Hlookup Hnur Hlayout Hvals Hfocus)
+    as [j [Hfields Hgt_fields]].
+  rewrite Hfields_eq in Hfields.
+  repeat split.
+  - intros l0 r0 T HinSigma.
+    simpl in HinSigma. destruct HinSigma as [Heq | HinSigma].
+    + inversion Heq; subst l0 r0 T.
+      exists i, j. split.
+      * exact Hlookup.
+      * econstructor.
+        -- apply heap_lookup_store_write_eq.
+        -- exact Hdc.
+        -- eapply end_witness_fields_store_write_fresh; eauto.
+    + destruct (Hmap l0 r0 T HinSigma) as [i1 [j1 [Hlk Hew]]].
+      exists i1, j1. split.
+      * exact Hlk.
+      * eapply end_witness_store_write_fresh; eauto.
+  - intros l0 r0 HinC. eauto.
+  - intros l0 r0 lprev HinC. eauto.
+  - intros l0 r0 T l1 HinC.
+    destruct (Hafter l0 r0 T l1 HinC) as [i1 [j1 [Hsrc [Hew Hdst]]]].
+    exists i1, j1. repeat split; eauto.
+    eapply end_witness_store_write_fresh; eauto.
+  - intros r0 l0 HinA HinN.
+    simpl in HinA. destruct HinA as [Heq | HinA].
+    + inversion Heq; subst. exfalso.
+      eapply not_in_remove_nursery_self. exact HinN.
+    + destruct (in_remove_alloc_region_inv _ _ _ _ HinA) as [HinA_old Hrneq].
+      destruct (in_remove_nursery_inv _ _ _ HinN) as [HinN_old Hneq_lr].
+      destruct (Hlin1 r0 l0 HinA_old HinN_old) as [i1 [Hlk Hgt]].
+      exists i1. split; eauto.
+      rewrite allocptr_store_write_other by exact Hrneq.
+      exact Hgt.
+  - intros r0 l0 i1 T j1 HinA Hlk Hnin Hew.
+    simpl in HinA. destruct HinA as [Heq | HinA].
+    + inversion Heq; subst.
+      rewrite Hlookup in Hlk. inversion Hlk; subst i1.
+      assert (Hew_root :
+        end_witness DI (store_write S r0 i dc) (r0, i) tc (r0, j)).
+      { econstructor.
+        - apply heap_lookup_store_write_eq.
+        - exact Hdc.
+        - eapply end_witness_fields_store_write_fresh; eauto. }
+      inversion Hew; subst.
+      lazymatch goal with
+      | [ Hheap : heap_lookup (store_write S ?rw ?iw ?dw) ?rr ?ii = Some ?K,
+          Hinfo : lookup_datacon DI ?K = Some (?tyc, ?fts) |- _ ] =>
+          rewrite heap_lookup_store_write_eq in Hheap;
+          inversion Hheap; subst;
+          rewrite Hdc in Hinfo;
+          inversion Hinfo; subst
+      end.
+      assert (Heq_end : (r0, j1) = (r0, j)).
+      { eapply end_witness_functional; eauto. }
+      inversion Heq_end; subst j1.
+      eapply gt_allocptr_store_write_same.
+      * exact Hgt_fields.
+      * eapply end_witness_gt. exact Hew_root.
+    + destruct (in_remove_alloc_region_inv _ _ _ _ HinA) as [HinA_old Hrneq].
+      pose proof
+        (end_witness_store_write_other_region
+           DI S r i dc r0 i1 T j1 Hrneq Hew) as Hew_old.
+      assert (Hneq_lr : (l0, r0) <> (l, r)).
+      { intro Heq. inversion Heq; contradiction. }
+      pose proof
+        (not_in_remove_nursery_preserved N (l, r) (l0, r0) Hneq_lr Hnin)
+        as Hnin_old.
+      rewrite allocptr_store_write_other by exact Hrneq.
+      eapply Hlin2; eauto.
+  - intros l0 r0 HinN.
+    destruct (in_remove_nursery_inv _ _ _ HinN) as [HinN_old Hneq_root].
+    destruct (Hwrite l0 r0 HinN_old) as [i1 [Hlk Hnone]].
+    exists i1. split.
+    + exact Hlk.
+    + destruct (region_var_eq_dec r0 r) as [Heq_r | Hneq_r].
+      * subst r0.
+        destruct (Nat.eq_dec i1 i) as [Heq_i | Hneq_i].
+        -- subst i1.
+           assert (Heq_lr : (l0, r) = (l, r)).
+           { eapply Hninj; eauto. }
+           contradiction.
+        -- rewrite heap_lookup_store_write_neq; eauto.
+           intros Heq. inversion Heq; contradiction.
+      * rewrite heap_lookup_store_write_neq; eauto.
+        intros Heq. inversion Heq; contradiction.
+  - intros r0 HinA.
+    simpl in HinA. destruct HinA as [Heq | HinA].
+    + inversion Heq.
+    + destruct (in_remove_alloc_region_inv _ _ _ _ HinA) as [HinA_old Hneq].
+      rewrite store_find_heap_store_write_other by exact Hneq.
+      eapply Hempty. exact HinA_old.
+  - intros r0 Hheap.
+    destruct (region_var_eq_dec r0 r) as [Heq | Hneq].
+    + subst. exists l. apply in_extend_alloc_new.
+    + rewrite store_find_heap_store_write_other in Hheap by exact Hneq.
+      destruct (Htracked r0 Hheap) as [l1 HinA].
+      exists l1. eapply in_extend_alloc_old; eauto.
+  - intros l0 r0 T HinSigma HinN.
+    simpl in HinSigma. destruct HinSigma as [Heq | HinSigma].
+    + inversion Heq; subst. eapply not_in_remove_nursery_self. exact HinN.
+    + destruct (in_remove_nursery_inv _ _ _ HinN) as [HinN_old _].
+      eapply Hdisj1; eauto.
+  - intros l0 r0 HinN HexSigma.
+    destruct (in_remove_nursery_inv _ _ _ HinN) as [HinN_old Hneq_root].
+    simpl in HexSigma. destruct HexSigma as [T [Heq | HinSigma]].
+    + inversion Heq; subst. contradiction.
+    + eapply Hdisj2; eauto.
 Qed.
 
 Lemma in_store_laddrs_of_entry :
@@ -2784,12 +3394,20 @@ Qed.
 (* with the input environments it actually inhabits, while keeping    *)
 (* the source judgment's output environments fixed.  This is the      *)
 (* shape needed to rebuild enclosing rules like T_Let.                *)
+(*                                                                    *)
+(* The thesis proof text also treats freshness of symbolic locations  *)
+(* as though it automatically ruled out concrete aliasing among live  *)
+(* nursery cells.  The D_DataCon case shows that this is too weak for *)
+(* the mechanization: we need an explicit invariant saying that live  *)
+(* nursery locations map to distinct concrete cells.  We keep that    *)
+(* stronger premise explicit here instead of silently assuming it.    *)
 (* ================================================================= *)
 
 Theorem preservation :
   forall FDs DI G Sigma C A N Aout Nout Afresh Nfresh M S e Ty S' M' e',
     Forall (fdecl_has_type FDs DI) FDs ->
     gamma_binders_disjoint G e ->
+    nursery_locmap_injective N M ->
     has_type FDs DI G Sigma C A N Aout Nout e Ty ->
     has_type_fresh FDs DI G Sigma C A N Afresh Nfresh e Ty ->
     store_wf DI Sigma C A N M S ->
@@ -2801,12 +3419,40 @@ Theorem preservation :
       /\ conloc_extends C C'.
 Proof.
   intros FDs DI G Sigma C A N Aout Nout Afresh Nfresh M S e Ty S' M' e'
-         Hfds Hgamma Hty Hfresh Hwf Hstep.
-  revert G Ty Sigma C A N Aout Nout Afresh Nfresh Hfds Hgamma Hty Hfresh Hwf.
+         Hfds Hgamma Hninj Hty Hfresh Hwf Hstep.
+  revert G Ty Sigma C A N Aout Nout Afresh Nfresh Hfds Hgamma Hninj Hty Hfresh Hwf.
   induction Hstep;
-    intros G Ty Sigma C A N Aout Nout Afresh Nfresh Hfds Hgamma Hty Hfresh Hwf.
+    intros G Ty Sigma C A N Aout Nout Afresh Nfresh Hfds Hgamma Hninj Hty Hfresh Hwf.
   - (* D_DataCon *)
-    admit.
+    eapply has_type_datacon_inv in Hty.
+    destruct Hty
+      as [tc [fieldtcs [fields
+          [HTy [HAout [HNout [Hdc [Hnur [Hfields_eq [Hlayout [Hfocus Hvals]]]]]]]]]]].
+    subst Ty Aout Nout.
+    pose proof Hwf as Hwf0.
+    destruct Hwf as [_ [_ [Halloc _]]].
+    destruct Halloc as [_ [_ [Hwrite _]]].
+    destruct (Hwrite l r Hnur) as [i0 [Hlookup0 _]].
+    rewrite H in Hlookup0. inversion Hlookup0; subst rc i0.
+    exists (extend_store Sigma (l, r) tc), C,
+           (extend_alloc A r (AP_Loc (l, r))),
+           (remove_nursery N (l, r)).
+    split.
+    + econstructor. simpl. left. reflexivity.
+    + split.
+      * eapply store_wf_datacon_step.
+        -- exact Hwf0.
+        -- exact Hninj.
+        -- exact Hdc.
+        -- exact Hnur.
+        -- exact Hfields_eq.
+        -- exact Hlayout.
+        -- exact Hfocus.
+        -- exact Hvals.
+        -- exact H.
+      * split.
+        -- intros lr tc' Hin. simpl. right. exact Hin.
+        -- apply conloc_extends_refl.
   - (* D_LetLoc_Start *)
     eapply preservation_letloc_start_case; eauto.
   - (* D_LetLoc_Tag *)
@@ -2829,7 +3475,7 @@ Proof.
       - exact Hfresh1.
     }
     destruct (IHHstep G (LocTy tc1 l1 r1) Sigma C A N A1 N1 A1 N1
-                      Hfds Hgamma_e1 Hty1 Hfresh1' Hwf)
+                      Hfds Hgamma_e1 Hninj Hty1 Hfresh1' Hwf)
       as [Sigma' [C' [Ain' [Nin' [Hty' [Hwf' [Hse Hce]]]]]]].
     eapply preservation_let_expr_case; eauto.
   - (* D_Let_Val *)

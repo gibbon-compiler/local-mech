@@ -329,7 +329,7 @@ Inductive has_type :
       forall FDs DI G S0 C A N (dc : datacon) (l : loc_var) (r : region_var)
              (vs : list val) (tc : tycon) (fieldtcs : list tycon)
              (fields : list field_layout_entry),
-        In (dc, (tc, fieldtcs)) DI ->
+        lookup_datacon DI dc = Some (tc, fieldtcs) ->
         In (l, r) N ->
         map snd fields = fieldtcs ->
         constructor_layout C l r None fields ->
@@ -579,7 +579,7 @@ Proof.
   eapply T_Let.
   - (* Leaf l_a^r [] — T_DataCon *)
     eapply (T_DataCon _ _ _ _ _ _ _ _ _ _ _ _ (@nil tycon) (@nil field_layout_entry));
-      [ left; reflexivity      (* Leaf ∈ DI *)
+      [ simpl; destruct (datacon_eq_dec Lf Lf); [reflexivity|congruence]
       | left; reflexivity      (* (l_a,r) ∈ N *)
       | reflexivity
       | exact I
@@ -597,7 +597,7 @@ Proof.
     eapply T_Let.
     + (* Leaf l_b^r [] — T_DataCon *)
       eapply (T_DataCon _ _ _ _ _ _ _ _ _ _ _ _ (@nil tycon) (@nil field_layout_entry));
-        [ left; reflexivity    (* Leaf ∈ DI *)
+        [ simpl; destruct (datacon_eq_dec Lf Lf); [reflexivity|congruence]
         | left; reflexivity    (* (l_b,r) ∈ N *)
         | reflexivity
         | exact I
@@ -605,7 +605,9 @@ Proof.
         | constructor ].       (* empty fields / values *)
     + (* Line 6: Node l^r [x, y] — T_DataCon *)
       eapply (T_DataCon _ _ _ _ _ _ _ _ _ _ _ _ [T; T] [(la, T); (lb, T)]);
-        [ right; left; reflexivity  (* Node ∈ DI *)
+        [ simpl;
+          destruct (datacon_eq_dec Nd Lf); [discriminate|];
+          destruct (datacon_eq_dec Nd Nd); [reflexivity|congruence]
         | cbn; left; reflexivity    (* (l,r) ∈ N *)
         | reflexivity
         | split
