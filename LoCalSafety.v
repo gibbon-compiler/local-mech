@@ -442,6 +442,8 @@ Proof.
 Qed.
 
 Scheme has_type_ind' := Induction for has_type Sort Prop
+with field_vals_have_type_ind' := Induction for field_vals_have_type Sort Prop
+with app_vals_have_type_ind' := Induction for app_vals_have_type Sort Prop
 with pat_has_type_ind' := Induction for pat_has_type Sort Prop
 with pats_have_type_ind' := Induction for pats_have_type Sort Prop.
 
@@ -464,7 +466,14 @@ Lemma has_type_tenv_equiv :
       forall G', tenv_equiv G G' ->
       pats_have_type FDs DI tc_s G' Sigma C A N A' N' T ps).
 Proof.
-  apply typing_mutind.
+  eapply typing_mutind
+    with
+      (P0 := fun FDs DI G Sigma C A N r vs fields HT =>
+               forall G', tenv_equiv G G' ->
+                 field_vals_have_type FDs DI G' Sigma C A N r vs fields)
+      (P1 := fun FDs DI G Sigma C A N formals actuals vs params HT =>
+               forall G', tenv_equiv G G' ->
+                 app_vals_have_type FDs DI G' Sigma C A N formals actuals vs params).
   - intros FDs DI G S0 C A N x tc l r Hlookup Hstore G' Heq.
     apply T_Var.
     + rewrite <- (Heq x). exact Hlookup.
@@ -487,10 +496,11 @@ Proof.
   - intros FDs DI G S0 C A N A'' N'' l l1 r tc_prev e tc' l' r'
       Halloc Hstore Hnotin Hfresh Hneq Hty IH G' Heq.
     eapply T_LLAfter; eauto.
-  - intros FDs DI G S0 C A N dc l r vs tc fieldtcs Hdc Hnur Hlen G' Heq.
+  - intros FDs DI G S0 C A N dc l r vs tc fieldtcs fields
+      Hdc Hnur Hfields Hlayout Hfocus Hvals IHvals G' Heq.
     eapply T_DataCon; eauto.
   - intros FDs DI G S0 C A N f lrs vs tc l r f_locs f_params f_retty
-      f_regions f_body Hfd Hnur Halloc Hlen1 Hlen2 G' Heq.
+      f_regions f_body Hfd Hnur Halloc Hlen1 Hlen2 Hargs IHargs G' Heq.
     eapply T_App; eauto.
   - intros FDs DI G S0 C A N A' N' scrut ps tc_s l_s r_s t
       Hscrut IHscrut Hcover Hps IHps G' Heq.
@@ -498,6 +508,19 @@ Proof.
     + apply IHscrut. exact Heq.
     + exact Hcover.
     + apply IHps. exact Heq.
+  - intros FDs DI G S0 C A N r G' Heq.
+    exact (T_FieldValsNil FDs DI G' S0 C A N r).
+  - intros FDs DI G S0 C A N r vl fld vs flds Hhead IHhead Htail IHtail G' Heq.
+    eapply T_FieldValsCons.
+    + apply IHhead. exact Heq.
+    + apply IHtail. exact Heq.
+  - intros FDs DI G S0 C A N formals actuals G' Heq.
+    exact (T_AppValsNil FDs DI G' S0 C A N formals actuals).
+  - intros FDs DI G S0 C A N formals actuals vl param vs params
+      Hhead IHhead Htail IHtail G' Heq.
+    eapply T_AppValsCons.
+    + apply IHhead. exact Heq.
+    + apply IHtail. exact Heq.
   - intros FDs DI tc_s G S0 C A N A' N' dc binds body tc fieldtcs tc_res l r
       Hdc Htc Hfields Hstore Hbody IHbody G' Heq.
     eapply T_Pat; eauto.
@@ -718,6 +741,26 @@ Definition subst_pat_case
     has_type FDs DI nil Sigma C A N A N (e_val s) uty ->
     pat_has_type FDs DI tc_s (prefix ++ Gamma)%list Sigma C A N A' N' T (subst_pat_val z s p).
 
+Definition subst_field_vals_case
+    FDs DI G Sigma C A N r vs fields
+    (HT : field_vals_have_type FDs DI G Sigma C A N r vs fields) : Prop :=
+  forall prefix z uty Gamma s,
+    G = ((prefix ++ (z, uty) :: Gamma)%list) ->
+    lookup_tenv prefix z = None ->
+    has_type FDs DI nil Sigma C A N A N (e_val s) uty ->
+    field_vals_have_type FDs DI (prefix ++ Gamma)%list Sigma C A N r
+      (List.map (subst_in_val z s) vs) fields.
+
+Definition subst_app_vals_case
+    FDs DI G Sigma C A N formals actuals vs params
+    (HT : app_vals_have_type FDs DI G Sigma C A N formals actuals vs params) : Prop :=
+  forall prefix z uty Gamma s,
+    G = ((prefix ++ (z, uty) :: Gamma)%list) ->
+    lookup_tenv prefix z = None ->
+    has_type FDs DI nil Sigma C A N A N (e_val s) uty ->
+    app_vals_have_type FDs DI (prefix ++ Gamma)%list Sigma C A N formals actuals
+      (List.map (subst_in_val z s) vs) params.
+
 Definition subst_pats_case
     FDs DI tc_s G Sigma C A N A' N' T ps
     (HT : pats_have_type FDs DI tc_s G Sigma C A N A' N' T ps) : Prop :=
@@ -740,7 +783,12 @@ Lemma substitution_val_mutual :
       (HT : pats_have_type FDs DI tc_s G Sigma C A N A' N' T ps),
       subst_pats_case FDs DI tc_s G Sigma C A N A' N' T ps HT).
 Proof.
-  apply typing_mutind.
+  eapply typing_mutind
+    with
+      (P0 := fun FDs DI G Sigma C A N r vs fields HT =>
+               subst_field_vals_case FDs DI G Sigma C A N r vs fields HT)
+      (P1 := fun FDs DI G Sigma C A N formals actuals vs params HT =>
+               subst_app_vals_case FDs DI G Sigma C A N formals actuals vs params HT).
   - intros FDs DI G Sigma C A N x tc l r Hlookup Hstore.
     unfold subst_expr_case.
     intros prefix z uty Gamma s HG Hnone Hclosed.
@@ -834,19 +882,18 @@ Proof.
     eapply closed_value_typing_any_context.
     + exact Hclosed.
     + intros lr tc'' Hin. exact Hin.
-  - intros FDs DI G Sigma C A N dc l r vs tc fieldtcs Hdc Hnur Hlen.
+  - intros FDs DI G Sigma C A N dc l r vs tc fieldtcs fields
+      Hdc Hnur Hfields Hlayout Hfocus Hvals IHvals.
     unfold subst_expr_case.
     intros prefix z uty Gamma s HG Hnone Hclosed.
     subst G. simpl.
     eapply T_DataCon; eauto.
-    rewrite map_length. exact Hlen.
   - intros FDs DI G Sigma C A N f lrs vs tc l r f_locs f_params f_retty
-      f_regions f_body Hfd Hnur Halloc Hlen1 Hlen2.
+      f_regions f_body Hfd Hnur Halloc Hlen1 Hlen2 Hargs IHargs.
     unfold subst_expr_case.
     intros prefix z uty Gamma s HG Hnone Hclosed.
     subst G. simpl.
     eapply T_App; eauto.
-    rewrite map_length. exact Hlen2.
   - intros FDs DI G Sigma C A N A' N' scrut ps tc_s l_s r_s t
       Hscrut IHscrut Hcover Hps IHps.
     unfold subst_expr_case.
@@ -856,6 +903,29 @@ Proof.
     + eapply IHscrut; eauto.
     + eapply pats_cover_subst_pats_val. exact Hcover.
     + eapply IHps; eauto.
+  - intros FDs DI G Sigma C A N r.
+    unfold subst_field_vals_case.
+    intros prefix z uty Gamma s HG Hnone Hclosed.
+    subst G. simpl. constructor.
+  - intros FDs DI G Sigma C A N r vl fld vs flds Hhead IHhead Htail IHtail.
+    unfold subst_field_vals_case.
+    intros prefix z uty Gamma s HG Hnone Hclosed.
+    subst G. simpl.
+    eapply T_FieldValsCons.
+    + eapply IHhead; eauto.
+    + eapply IHtail; eauto.
+  - intros FDs DI G Sigma C A N formals actuals.
+    unfold subst_app_vals_case.
+    intros prefix z uty Gamma s HG Hnone Hclosed.
+    subst G. simpl. constructor.
+  - intros FDs DI G Sigma C A N formals actuals vl param vs params
+      Hhead IHhead Htail IHtail.
+    unfold subst_app_vals_case.
+    intros prefix z uty Gamma s HG Hnone Hclosed.
+    subst G. simpl.
+    eapply T_AppValsCons.
+    + eapply IHhead; eauto.
+    + eapply IHtail; eauto.
   - intros FDs DI tc_s G Sigma C A N A' N' dc binds body tc fieldtcs tc_res l r
       Hdc Htc Hfields Hstore Hbody IHbody.
     unfold subst_pat_case.

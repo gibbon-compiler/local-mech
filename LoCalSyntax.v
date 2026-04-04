@@ -117,6 +117,65 @@ Fixpoint lookup_fdecl (FDs : list fdecl) (f : fun_var) : option fdecl :=
       end
   end.
 
+(* Shared location/region substitution on syntax-level objects.
+   These are used both by static instantiation and by the dynamic
+   semantics of function application. *)
+
+Definition subst_lvar (old_l new_l : loc_var) (l : loc_var) : loc_var :=
+  if loc_var_eq_dec old_l l then new_l else l.
+
+Definition subst_rvar (old_r new_r : region_var) (r : region_var)
+    : region_var :=
+  if region_var_eq_dec old_r r then new_r else r.
+
+Definition subst_loc_in_laddr
+    (lo : loc_var) (ro : region_var)
+    (ln : loc_var) (rn : region_var)
+    (a : laddr) : laddr :=
+  (subst_lvar lo ln (fst a), subst_rvar ro rn (snd a)).
+
+Definition subst_loc_in_locexp
+    (lo : loc_var) (ro : region_var)
+    (ln : loc_var) (rn : region_var)
+    (le : loc_exp) : loc_exp :=
+  match le with
+  | LE_Start r => LE_Start (subst_rvar ro rn r)
+  | LE_Next l r => LE_Next (subst_lvar lo ln l) (subst_rvar ro rn r)
+  | LE_After T l r => LE_After T (subst_lvar lo ln l) (subst_rvar ro rn r)
+  end.
+
+Definition subst_loc_in_ty
+    (lo : loc_var) (ro : region_var)
+    (ln : loc_var) (rn : region_var)
+    (t : ty) : ty :=
+  match t with
+  | loc_ty T l r => loc_ty T (subst_lvar lo ln l) (subst_rvar ro rn r)
+  end.
+
+Definition subst_loc_in_val
+    (lo : loc_var) (ro : region_var)
+    (ln : loc_var) (rn : region_var)
+    (v0 : val) : val :=
+  match v0 with
+  | v_var _ => v0
+  | v_cloc r i l rg =>
+      v_cloc (subst_rvar ro rn r) i (subst_lvar lo ln l) (subst_rvar ro rn rg)
+  end.
+
+Definition subst_loc_in_bind
+    (lo : loc_var) (ro : region_var)
+    (ln : loc_var) (rn : region_var)
+    (b : term_var * ty) : term_var * ty :=
+  (fst b, subst_loc_in_ty lo ro ln rn (snd b)).
+
+Fixpoint subst_locs_in_ty
+    (formals actuals : list laddr) (t : ty) : ty :=
+  match formals, actuals with
+  | (lo, ro) :: fs, (ln, rn) :: as_ =>
+      subst_locs_in_ty fs as_ (subst_loc_in_ty lo ro ln rn t)
+  | _, _ => t
+  end.
+
 Declare Custom Entry local_ty.
 Declare Custom Entry local_val.
 Declare Custom Entry local_exp.
