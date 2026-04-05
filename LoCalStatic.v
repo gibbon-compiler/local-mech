@@ -176,6 +176,23 @@ Definition letloc_fresh_ctx
   /\ ~ In lr (alloc_laddrs A)
   /\ ~ In lr N.
 
+Definition pat_bindings_wf
+    (r_scrut : region_var)
+    (binds : list (term_var * ty)) : Prop :=
+  NoDup (pat_term_vars binds)
+  /\ NoDup (pat_laddrs binds)
+  /\ Forall (fun b => bind_region_var b = r_scrut) binds.
+
+Definition pats_case_wf
+    (r_scrut : region_var)
+    (ps : list pat) : Prop :=
+  Forall
+    (fun p =>
+       match p with
+       | pat_clause _ binds _ => pat_bindings_wf r_scrut binds
+       end)
+    ps.
+
 (* Pattern coverage: every constructor of type tc in DI has a pattern. *)
 Definition pats_cover (DI : datacon_info) (tc : tycon) (pats : list pat) : Prop :=
   forall K fts,
@@ -374,6 +391,7 @@ Inductive has_type :
         has_type FDs DI G S0 C A N A N
                  (e_val scrut) (LocTy tc_s l_s r_s) ->
         pats_cover DI tc_s ps ->
+        pats_case_wf r_s ps ->
         pats_have_type FDs DI tc_s G S0 C A N A' N' t ps ->
         has_type FDs DI G S0 C A N A' N' (e_case scrut ps) t
 
@@ -471,16 +489,28 @@ with pats_have_type :
         pats_have_type FDs DI tc_s G S0 C A N A N t nil
 
   | T_PatsCons :
-      forall FDs DI tc_s G S0 C A N A1 N1 A2 N2 t p ps,
-        pat_has_type FDs DI tc_s G S0 C A N A1 N1 t p ->
-        pats_have_type FDs DI tc_s G S0 C A1 N1 A2 N2 t ps ->
-        pats_have_type FDs DI tc_s G S0 C A N A2 N2 t (cons p ps).
+      (* Branches are alternatives, not sequential effects.
+         So every branch is checked against the same input/output
+         allocation environments for the enclosing case. *)
+      forall FDs DI tc_s G S0 C A N A' N' t p ps,
+        pat_has_type FDs DI tc_s G S0 C A N A' N' t p ->
+        pats_have_type FDs DI tc_s G S0 C A N A' N' t ps ->
+        pats_have_type FDs DI tc_s G S0 C A N A' N' t (cons p ps).
 
 (* ---- T-FunctionDef (thesis: \tfunctiondef) ----
    Γ;Σ;C;A;N ⊢ A;N'; body : τ@l^r    (l,r) ∉ N'
    where Γ = {x_i ↦ arg_i}, Σ = {(l_i,r_i) ↦ tc_i} from args,
-         C = ∅,  A = {r_out ↦ (l_out,r_out)},  N = {(l_out,r_out)}
-   [+ location-param correspondence — see thesis] *)
+   C = ∅,  A = {r_out ↦ (l_out,r_out)},  N = {(l_out,r_out)}
+   [+ location-param correspondence — see thesis]
+
+   Note: the thesis preservation argument for D_App reasons as if a
+   well-typed function body can be instantiated into an arbitrary
+   caller Sigma/C/A/N satisfying the output-location side conditions.
+   This rule, as written, only types the body in its standalone
+   function-definition environment.  Closing the D_App preservation
+   case therefore requires either an explicit instantiation lemma that
+   bridges from this standalone judgment to the caller's environment,
+   or a stronger function-definition judgment. *)
 Inductive fdecl_has_type : fun_env -> datacon_info -> fdecl -> Prop :=
   | T_FunctionDef :
       forall FDs DI f locs (named_args : list (term_var * ty)) out regions body
