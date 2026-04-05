@@ -237,6 +237,19 @@ Proof.
       * eapply IH. exact Hin.
 Qed.
 
+Lemma lookup_fdecl_In :
+  forall FDs f fd,
+    lookup_fdecl FDs f = Some fd ->
+    In fd FDs.
+Proof.
+  induction FDs as [| fd0 FDs' IH]; intros f fd Hlk; simpl in Hlk.
+  - discriminate.
+  - destruct fd0 as [f0 l0 p0 t0 rg0 b0].
+    destruct (fun_var_eq_dec f f0).
+    + inversion Hlk; subst. left. reflexivity.
+    + right. eapply IH. exact Hlk.
+Qed.
+
 
 (* ================================================================= *)
 (* Additional invariants needed for progress                          *)
@@ -391,6 +404,27 @@ Lemma has_type_datacon_inv :
       In (r, AP_Loc (constructor_focus_loc l fields, r)) A /\
       field_vals_have_type FDs DI G Sigma C A N r vs fields.
 Admitted.
+
+Lemma has_type_app_inv :
+  forall FDs DI G Sigma C A N Aout Nout f lrs vs Ty,
+    has_type FDs DI G Sigma C A N Aout Nout (e_app f lrs vs) Ty ->
+    exists tc l r f_locs f_params f_retty f_regions f_body,
+      Ty = LocTy tc l r /\
+      Aout = A /\
+      Nout = remove_nursery N (l, r) /\
+      lookup_fdecl FDs f =
+        Some (FunDecl f f_locs f_params f_retty f_regions f_body) /\
+      In (l, r) N /\
+      In (r, AP_Loc (l, r)) A /\
+      List.length lrs = List.length f_locs /\
+      subst_locs_in_ty f_locs lrs f_retty = LocTy tc l r /\
+      app_vals_have_type FDs DI G Sigma C A N f_locs lrs vs f_params.
+Proof.
+  intros FDs DI G Sigma C A N Aout Nout f lrs vs Ty Hty.
+  inversion Hty; subst.
+  exists tc, l, r, f_locs, f_params, f_retty, f_regions, f_body.
+  repeat split; eauto.
+Qed.
 
 Definition tenv_equiv (G1 G2 : type_env) : Prop :=
   forall x, lookup_tenv G1 x = lookup_tenv G2 x.
@@ -606,6 +640,47 @@ Proof.
   intros N lr Hin.
   destruct (in_remove_nursery_inv _ _ _ Hin) as [_ Hneq].
   contradiction.
+Qed.
+
+Lemma store_wf_remove_nursery :
+  forall DI Sigma C A N M S lr,
+    store_wf DI Sigma C A N M S ->
+    store_wf DI Sigma C A (remove_nursery N lr) M S.
+Proof.
+  intros DI Sigma C A N M S lr Hwf.
+  destruct Hwf as [Hmap [Hcfc [Halloc [Hdisj1 Hdisj2]]]].
+  destruct Hcfc as [Hstart [Hnext Hafter]].
+  destruct Halloc as [Hlin1 [Hlin2 [Hwrite [Hempty Htracked]]]].
+  repeat split.
+  * exact Hmap.
+  * exact Hstart.
+  * exact Hnext.
+  * exact Hafter.
+  * intros r l HinA HinN.
+      destruct (in_remove_nursery_inv _ _ _ HinN) as [HinN_old _].
+      eapply Hlin1; eauto.
+  * intros r l i T j HinA Hlk Hnin Hew.
+    destruct (in_dec laddr_eq_dec (l, r) N) as [HinN_old | Hnin_old].
+    + destruct (Hwrite l r HinN_old) as [i0 [Hlk0 Hnone]].
+      rewrite Hlk in Hlk0. inversion Hlk0; subst i0.
+      exfalso.
+      inversion Hew; subst.
+      match goal with
+      | Hheap : heap_lookup S r i = Some _ |- _ =>
+          rewrite Hheap in Hnone; discriminate
+      end.
+    + eapply Hlin2; eauto.
+  * intros l r HinN.
+      destruct (in_remove_nursery_inv _ _ _ HinN) as [HinN_old _].
+      eapply Hwrite; eauto.
+  * exact Hempty.
+  * exact Htracked.
+  * intros l r T HinSigma HinN.
+      destruct (in_remove_nursery_inv _ _ _ HinN) as [HinN_old _].
+      eapply Hdisj1; eauto.
+  * intros l r HinN Hex.
+      destruct (in_remove_nursery_inv _ _ _ HinN) as [HinN_old _].
+      eapply Hdisj2; eauto.
 Qed.
 
 Lemma fresh_region_store_absent :
@@ -3694,13 +3769,11 @@ Proof.
   }
 
   (* ---- T_App ----
-     The function declaration is in FDs (from T_App premise),
-     so In_lookup_fdecl gives lookup success for D_App. *)
+     T_App already carries the map-style function lookup that D_App
+     needs, so we can step directly. *)
   1: {
     right.
-    destruct (In_lookup_fdecl _ _ _ _ _ _ _ H)
-      as [l' [p' [t' [rg' [b' Hlk]]]]].
-    do 3 eexists. eapply D_App. exact Hlk.
+    do 3 eexists. eapply D_App. exact H.
   }
 
   (* ---- T_Case ----
@@ -3897,7 +3970,33 @@ Proof.
   - (* D_LetRegion *)
     eapply preservation_letregion_case; eauto.
   - (* D_App *)
-    admit.
+    eapply has_type_app_inv in Hty.
+    destruct Hty as
+      [tc [l [r [f_locs' [f_params' [f_retty' [f_regions' [f_body'
+        [HTy [HAout [HNout [Hlookup [Hnur [Halloc [Hlen [Hret Hargs]]]]]]]]]]]]]]]].
+    subst Ty Aout Nout.
+    assert (HinFD :
+      In (FunDecl f f_locs' f_params' f_retty' f_regions' f_body') FDs).
+    { eapply lookup_fdecl_In. exact Hlookup. }
+    assert (Hfdtyped :
+      fdecl_has_type FDs DI
+        (FunDecl f f_locs' f_params' f_retty' f_regions' f_body')).
+    { eapply Forall_forall; eauto. }
+    rewrite H in Hlookup. inversion Hlookup; subst; clear Hlookup.
+    inversion Hfdtyped as
+      [ ? ? ? locs0 named_args0 out0 regions0 body0
+          N'0 tc_out0 l_out0 r_out0
+          HfdIn0 Hout0 Huses0 Hret0 Hbody0 Hnotin0 Hinst ];
+      subst; clear Hfdtyped.
+    cbv [instantiated_fun_body] in *.
+    exists Sigma, C, A, N.
+    split.
+    + eapply Hinst; eauto.
+    + split.
+      * exact Hwf.
+      * split.
+        -- apply store_extends_refl.
+        -- apply conloc_extends_refl.
   - (* D_Case *)
     inversion Hty; subst; clear Hty.
     inversion Hfresh; subst; clear Hfresh.
@@ -3921,29 +4020,34 @@ Proof.
         pose proof (pats_case_fresh_ctx_In _ _ _ _ _ _ _ _ Hcasefresh HinPs) as Hbindfresh
     end.
     inversion Hpty; subst; clear Hpty.
-    match goal with
-    | Hbody :
-        has_type _ _ (extend_tenv_list G binds)
-                 (extend_store_list Sigma (pat_store_entries binds))
-                 _ _ _ _ _ body _,
-      Hbindwf : pat_bindings_wf _ binds,
-      Hbindfresh : pat_bindings_fresh_ctx Sigma C A N binds,
-      Hstarts : field_starts DI S rc (i + 1) (pat_field_tycons binds) indices |- _ =>
-        destruct Hbindwf as [Hnd_terms [Hnd_laddrs Hregions]];
-        assert (Hleninds : List.length binds = List.length indices) by
-          (rewrite <- (map_length bind_tycon binds);
-           eapply field_starts_length;
-           exact Hstarts);
-        exists (extend_store_list Sigma (pat_store_entries binds)), C, A, N;
-        split;
-        [ eapply subst_case_bindings; [exact Hnd_terms | exact Hleninds | exact Hbody]
-        | split;
-          [ eapply store_wf_extend_case_bindings; eauto
-          | split;
-            [ intros lr tc Hin; apply in_extend_store_list; exact Hin
-            | apply conloc_extends_refl ] ] ]
-    end.
-Admitted.
+    pose proof (pats_case_wf_In _ _ _ _ _ H17 HinPs) as Hbindwf0.
+    destruct Hbindwf0 as [Hnd_terms [Hnd_laddrs Hregions]].
+    assert (Hrc_eq_rs : rc = r_s) by
+      (simpl in Hewf;
+       destruct Hewf as [Hscrutwf _];
+       inversion H6; subst;
+       pose proof Hwf as Hwf_case;
+       destruct Hwf_case as [Hmap_case _];
+       destruct (Hmap_case l_s r_s tc_s H18)
+         as [i_scrut [j_scrut [Hlk_scrut _]]];
+       rewrite Hscrutwf in Hlk_scrut;
+       inversion Hlk_scrut;
+       reflexivity).
+    assert (Hbindwf_rc : pat_bindings_wf rc binds) by
+      (rewrite Hrc_eq_rs; repeat split; assumption).
+    assert (Hleninds : List.length binds = List.length indices) by
+      (rewrite <- (map_length bind_tycon binds);
+       eapply field_starts_length;
+       exact H3).
+    exists (extend_store_list Sigma (pat_store_entries binds)), C, A, N.
+    split.
+    + eapply subst_case_bindings; [exact Hnd_terms | exact Hleninds | exact H27].
+    + split.
+      * eapply store_wf_extend_case_bindings; eauto.
+      * split.
+        -- intros lr tc Hin. apply in_extend_store_list. exact Hin.
+        -- apply conloc_extends_refl.
+Qed.
 
 (* ================================================================= *)
 (* Theorem: Type Safety  (thesis §2.2.3, Theorem Type Safety)        *)

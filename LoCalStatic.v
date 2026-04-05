@@ -4,7 +4,9 @@ From Stdlib Require Import List.
 Import ListNotations.
 From Stdlib Require Import Strings.String.
 From LocalMech Require Import LoCalSyntax.
+From LocalMech Require Import LoCalDynamic.
 Import LoCalSyntax.LoCalSyntax.
+Import LoCalDynamic.LoCalDynamic.
 
 Module LoCalStatic.
 
@@ -132,6 +134,17 @@ Definition bind_uses_formal_locs (locs : list laddr) (b : term_var * ty) : Prop 
 Definition instantiated_param_type
     (formals actuals : list laddr) (param : term_var * ty) : located_type :=
   subst_locs_in_ty formals actuals (snd param).
+
+(* This is pure syntactic instantiation for function bodies; it is
+   currently defined in LoCalDynamic because the dynamic rule uses it
+   directly, but the static function-definition judgment also needs to
+   talk about the same instantiated body. *)
+Definition instantiated_fun_body
+    (formals actuals : list laddr)
+    (params : list (term_var * ty))
+    (val_args : list val)
+    (body : expr) : expr :=
+  subst_app_fresh formals actuals params val_args body.
 
 Definition fresh_region (A : alloc_env) (r : region_var) : Prop :=
   forall ap, ~ In (r, ap) A.
@@ -371,7 +384,11 @@ Inductive has_type :
              (lrs : list (loc_var * region_var)) (vs : list val)
              (tc : tycon) (l : loc_var) (r : region_var)
              f_locs f_params f_retty f_regions f_body,
-        In (FunDecl f f_locs f_params f_retty f_regions f_body) FDs ->
+        (* The thesis treats FDs as a function environment/map, and
+           D_App steps by lookup, so typing applications should use the
+           same map-style view rather than bare list membership. *)
+        lookup_fdecl FDs f =
+          Some (FunDecl f f_locs f_params f_retty f_regions f_body) ->
         In (l, r) N ->
         In (r, AP_Loc (l, r)) A ->
         List.length lrs = List.length f_locs ->
@@ -507,10 +524,9 @@ with pats_have_type :
    well-typed function body can be instantiated into an arbitrary
    caller Sigma/C/A/N satisfying the output-location side conditions.
    This rule, as written, only types the body in its standalone
-   function-definition environment.  Closing the D_App preservation
-   case therefore requires either an explicit instantiation lemma that
-   bridges from this standalone judgment to the caller's environment,
-   or a stronger function-definition judgment. *)
+   function-definition environment.  We therefore make the caller-side
+   instantiation obligation explicit here, matching what the thesis
+   proof already relies on in the D_App preservation case. *)
 Inductive fdecl_has_type : fun_env -> datacon_info -> fdecl -> Prop :=
   | T_FunctionDef :
       forall FDs DI f locs (named_args : list (term_var * ty)) out regions body
@@ -530,6 +546,16 @@ Inductive fdecl_has_type : fun_env -> datacon_info -> fdecl -> Prop :=
                  N'
                  body out ->
         ~ In (l_out, r_out) N' ->
+        (forall G Sigma C A N lrs vs tc l r,
+            In (l, r) N ->
+            In (r, AP_Loc (l, r)) A ->
+            List.length lrs = List.length locs ->
+            subst_locs_in_ty locs lrs out = LocTy tc l r ->
+            app_vals_have_type FDs DI G Sigma C A N locs lrs vs named_args ->
+            has_type FDs DI G Sigma C A N
+                     A (remove_nursery N (l, r))
+                     (instantiated_fun_body locs lrs named_args vs body)
+                     (LocTy tc l r)) ->
         fdecl_has_type FDs DI (FunDecl f locs named_args out regions body).
 
 (* ---- T-Program (thesis: \tprogram) ----
