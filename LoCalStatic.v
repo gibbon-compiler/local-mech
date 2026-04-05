@@ -520,13 +520,12 @@ with pats_have_type :
    C = ∅,  A = {r_out ↦ (l_out,r_out)},  N = {(l_out,r_out)}
    [+ location-param correspondence — see thesis]
 
-   Note: the thesis preservation argument for D_App reasons as if a
-   well-typed function body can be instantiated into an arbitrary
-   caller Sigma/C/A/N satisfying the output-location side conditions.
-   This rule, as written, only types the body in its standalone
-   function-definition environment.  We therefore make the caller-side
-   instantiation obligation explicit here, matching what the thesis
-   proof already relies on in the D_App preservation case. *)
+   Thesis alignment note:
+   this rule only states the standalone typing fact for the function
+   body, which is the static rule the thesis presents.  The caller-side
+   instantiation principle needed by D_App is tracked separately below
+   as an explicit meta-theoretic obligation, rather than being baked
+   into the static semantics itself. *)
 Inductive fdecl_has_type : fun_env -> datacon_info -> fdecl -> Prop :=
   | T_FunctionDef :
       forall FDs DI f locs (named_args : list (term_var * ty)) out regions body
@@ -546,17 +545,28 @@ Inductive fdecl_has_type : fun_env -> datacon_info -> fdecl -> Prop :=
                  N'
                  body out ->
         ~ In (l_out, r_out) N' ->
-        (forall G Sigma C A N lrs vs tc l r,
-            In (l, r) N ->
-            In (r, AP_Loc (l, r)) A ->
-            List.length lrs = List.length locs ->
-            subst_locs_in_ty locs lrs out = LocTy tc l r ->
-            app_vals_have_type FDs DI G Sigma C A N locs lrs vs named_args ->
-            has_type FDs DI G Sigma C A N
-                     A (remove_nursery N (l, r))
-                     (instantiated_fun_body locs lrs named_args vs body)
-                     (LocTy tc l r)) ->
         fdecl_has_type FDs DI (FunDecl f locs named_args out regions body).
+
+(* The thesis uses the function-definition typing fact together with a
+   simultaneous location/value instantiation lemma in the D_App proof.
+   The mechanization does not yet derive that lemma from T_FunctionDef,
+   so we keep the missing principle explicit at the meta level instead
+   of hiding it inside the static rule. *)
+Definition fdecl_instantiation_ok
+    (FDs : fun_env) (DI : datacon_info) (fd : fdecl) : Prop :=
+  match fd with
+  | FunDecl _ locs named_args out _ body =>
+      forall G Sigma C A N lrs vs tc l r,
+        In (l, r) N ->
+        In (r, AP_Loc (l, r)) A ->
+        List.length lrs = List.length locs ->
+        subst_locs_in_ty locs lrs out = LocTy tc l r ->
+        app_vals_have_type FDs DI G Sigma C A N locs lrs vs named_args ->
+        has_type FDs DI G Sigma C A N
+                 A (remove_nursery N (l, r))
+                 (instantiated_fun_body locs lrs named_args vs body)
+                 (LocTy tc l r)
+  end.
 
 (* ---- T-Program (thesis: \tprogram) ----
    ⊢_fun FD_i  (for each function declaration)

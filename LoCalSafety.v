@@ -403,7 +403,12 @@ Lemma has_type_datacon_inv :
       constructor_layout C l r None fields /\
       In (r, AP_Loc (constructor_focus_loc l fields, r)) A /\
       field_vals_have_type FDs DI G Sigma C A N r vs fields.
-Admitted.
+Proof.
+  intros FDs DI G Sigma C A N Aout Nout dc l r vs Ty Hty.
+  inversion Hty; subst.
+  eexists _, _, _.
+  repeat split; eauto.
+Qed.
 
 Lemma has_type_app_inv :
   forall FDs DI G Sigma C A N Aout Nout f lrs vs Ty,
@@ -1026,6 +1031,23 @@ Scheme has_type_fresh_ind' := Induction for has_type_fresh Sort Prop
 with pat_has_type_fresh_ind' := Induction for pat_has_type_fresh Sort Prop
 with pats_have_type_fresh_ind' := Induction for pats_have_type_fresh Sort Prop.
 
+Lemma pat_has_type_fresh_tc_irrel :
+  forall FDs DI tc_s G Sigma C A N A' N' T p,
+    pat_has_type_fresh FDs DI tc_s G Sigma C A N A' N' T p ->
+    forall tc_s',
+      pat_has_type_fresh FDs DI tc_s' G Sigma C A N A' N' T p
+with pats_have_type_fresh_tc_irrel :
+  forall FDs DI tc_s G Sigma C A N A' N' T ps,
+    pats_have_type_fresh FDs DI tc_s G Sigma C A N A' N' T ps ->
+    forall tc_s',
+      pats_have_type_fresh FDs DI tc_s' G Sigma C A N A' N' T ps.
+Proof.
+  - intros FDs DI tc_s G Sigma C A N A' N' T p Hfresh.
+    induction Hfresh; intros tc_s'; econstructor; eauto.
+  - intros FDs DI tc_s G Sigma C A N A' N' T ps Hfresh.
+    induction Hfresh; intros tc_s'; constructor; eauto using pat_has_type_fresh_tc_irrel.
+Qed.
+
 Lemma has_type_fresh_let_inv :
   forall FDs DI G Sigma C A N Aout Nout x tc1 l1 r1 e1 e2 Ty,
     has_type_fresh FDs DI G Sigma C A N Aout Nout
@@ -1061,6 +1083,143 @@ Definition pats_fresh_realign_case
     pats_have_type_fresh FDs DI tc_s G Sigma C A N Aoutf Noutf T ps ->
     pats_have_type_fresh FDs DI tc_s G Sigma C A N Aout Nout T ps.
 
+Definition expr_fresh_outputs_case
+  FDs DI G Sigma C A N Aout Nout e T
+  (HT : has_type FDs DI G Sigma C A N Aout Nout e T) : Prop :=
+  forall Aoutf Noutf,
+    has_type_fresh FDs DI G Sigma C A N Aoutf Noutf e T ->
+    Aoutf = Aout /\ Noutf = Nout.
+
+Definition pat_fresh_outputs_case
+  FDs DI tc_s G Sigma C A N Aout Nout T p
+  (HT : pat_has_type FDs DI tc_s G Sigma C A N Aout Nout T p) : Prop :=
+  forall Aoutf Noutf,
+    pat_has_type_fresh FDs DI tc_s G Sigma C A N Aoutf Noutf T p ->
+    Aoutf = Aout /\ Noutf = Nout.
+
+Definition pats_fresh_outputs_case
+  FDs DI tc_s G Sigma C A N Aout Nout T ps
+  (HT : pats_have_type FDs DI tc_s G Sigma C A N Aout Nout T ps) : Prop :=
+  forall Aoutf Noutf,
+    pats_have_type_fresh FDs DI tc_s G Sigma C A N Aoutf Noutf T ps ->
+    Aoutf = Aout /\ Noutf = Nout.
+
+Lemma has_type_fresh_outputs_mutual :
+  (forall FDs DI G Sigma C A N Aout Nout e T
+      (HT : has_type FDs DI G Sigma C A N Aout Nout e T),
+      expr_fresh_outputs_case FDs DI G Sigma C A N Aout Nout e T HT)
+  /\
+  (forall FDs DI tc_s G Sigma C A N Aout Nout T p
+      (HT : pat_has_type FDs DI tc_s G Sigma C A N Aout Nout T p),
+      pat_fresh_outputs_case FDs DI tc_s G Sigma C A N Aout Nout T p HT)
+  /\
+  (forall FDs DI tc_s G Sigma C A N Aout Nout T ps
+      (HT : pats_have_type FDs DI tc_s G Sigma C A N Aout Nout T ps),
+      pats_fresh_outputs_case FDs DI tc_s G Sigma C A N Aout Nout T ps HT).
+Proof.
+  eapply typing_mutind
+    with
+      (P0 := fun _ _ _ _ _ _ _ _ _ _ _ => True)
+      (P1 := fun _ _ _ _ _ _ _ _ _ _ _ _ => True).
+  - intros FDs DI G Sigma C A N x tc l r Hlookup Hstore.
+    unfold expr_fresh_outputs_case.
+    intros Aoutf Noutf Hfresh. inversion Hfresh; subst; auto.
+  - intros FDs DI G Sigma C A N r0 i l r tc Hstore.
+    unfold expr_fresh_outputs_case.
+    intros Aoutf Noutf Hfresh. inversion Hfresh; subst; auto.
+  - intros FDs DI G Sigma C A N A' N' A'' N'' x e1 e2 tc1 l1 r1 tc2 l2 r2
+      Hty1 IH1 Hty2 IH2.
+    unfold expr_fresh_outputs_case.
+    intros Aoutf Noutf Hfresh.
+    eapply has_type_fresh_let_inv in Hfresh as [A1f [N1f [Hfresh1 Hfresh2]]].
+    destruct (IH1 _ _ Hfresh1) as [HA1 HN1]. subst A1f N1f.
+    destruct (IH2 _ _ Hfresh2) as [HA2 HN2]. subst Aoutf Noutf.
+    auto.
+  - intros FDs DI G Sigma C A N A' N' r e t Hfresh Hty IH.
+    unfold expr_fresh_outputs_case.
+    intros Aoutf Noutf Hfresh'.
+    inversion Hfresh'; subst.
+    match goal with
+    | Hbody : has_type_fresh FDs DI G Sigma C (extend_alloc A r AP_None) N _ _ e t |- _ =>
+        eapply IH in Hbody; exact Hbody
+    end.
+  - intros FDs DI G Sigma C A N A'' N'' l r e tc' l' r'
+      Halloc HfreshOut Hneq Hty IH.
+    unfold expr_fresh_outputs_case.
+    intros Aoutf Noutf Hfresh.
+    inversion Hfresh; subst.
+    match goal with
+    | Hbody : has_type_fresh FDs DI G Sigma
+                 (extend_conloc C (l, r) (LE_Start r))
+                 (extend_alloc A r (AP_Loc (l, r)))
+                 (extend_nursery N (l, r)) _ _ e (LocTy tc' l' r') |- _ =>
+        eapply IH in Hbody; exact Hbody
+    end.
+  - intros FDs DI G Sigma C A N A'' N'' l lprev r e tc'' l'' r''
+      Halloc Hnur HfreshOut Hneq Hty IH.
+    unfold expr_fresh_outputs_case.
+    intros Aoutf Noutf Hfresh.
+    inversion Hfresh; subst.
+    match goal with
+    | Hbody : has_type_fresh FDs DI G Sigma
+                 (extend_conloc C (l, r) (LE_Next lprev r))
+                 (extend_alloc A r (AP_Loc (l, r)))
+                 (extend_nursery N (l, r)) _ _ e (LocTy tc'' l'' r'') |- _ =>
+        eapply IH in Hbody; exact Hbody
+    end.
+  - intros FDs DI G Sigma C A N A'' N'' l l1 r tc_prev e tc' l' r'
+      Halloc Hstore Hnotin HfreshOut Hneq Hty IH.
+    unfold expr_fresh_outputs_case.
+    intros Aoutf Noutf Hfresh.
+    inversion Hfresh; subst.
+    match goal with
+    | Hbody : has_type_fresh FDs DI G Sigma
+                 (extend_conloc C (l, r) (LE_After tc_prev l1 r))
+                 (extend_alloc A r (AP_Loc (l, r)))
+                 (extend_nursery N (l, r)) _ _ e (LocTy tc' l' r') |- _ =>
+        eapply IH in Hbody; exact Hbody
+    end.
+  - intros FDs DI G Sigma C A N dc l r vs tc fieldtcs fields
+      Hdc Hnur Hfields Hlayout Hfocus Hvals _.
+    unfold expr_fresh_outputs_case.
+    intros Aoutf Noutf Hfresh. inversion Hfresh; subst; auto.
+  - intros FDs DI G Sigma C A N f lrs vs tc l r f_locs f_params f_retty
+      f_regions f_body Hfd Hnur Halloc Hlen Hret Hargs _.
+    unfold expr_fresh_outputs_case.
+    intros Aoutf Noutf Hfresh. inversion Hfresh; subst; auto.
+  - intros FDs DI G Sigma C A N A' N' scrut ps tc_s l_s r_s t
+      Hscrut _ Hcover Hcasewf Hps IHps.
+    unfold expr_fresh_outputs_case.
+    intros Aoutf Noutf Hfresh.
+    inversion Hfresh; subst.
+    eapply IHps.
+    eapply pats_have_type_fresh_tc_irrel.
+    exact H12.
+  - intros. exact I.
+  - intros. exact I.
+  - intros. exact I.
+  - intros. exact I.
+  - intros FDs DI tc_s G Sigma C A N A' N' dc binds body tc fieldtcs tc_res l r
+      Hdc Htc Hfields Hstore Hbody IHbody.
+    unfold pat_fresh_outputs_case.
+    intros Aoutf Noutf Hfresh.
+    inversion Hfresh; subst.
+    match goal with
+    | Hbodyf : has_type_fresh _ _ _ _ _ _ _ _ _ body _ |- _ =>
+        eapply IHbody in Hbodyf; exact Hbodyf
+    end.
+  - intros FDs DI tc_s G Sigma C A N t.
+    unfold pats_fresh_outputs_case.
+    intros Aoutf Noutf Hfresh.
+    inversion Hfresh; subst; auto.
+  - intros FDs DI tc_s G Sigma C A N A' N' t p ps Hpat IHpat Hps IHps.
+    unfold pats_fresh_outputs_case.
+    intros Aoutf Noutf Hfresh.
+    inversion Hfresh; subst.
+    eapply IHpat in H12.
+    exact H12.
+Qed.
+
 Theorem has_type_fresh_realign_mutual :
   (forall FDs DI G Sigma C A N Aout Nout e T
       (HT : has_type FDs DI G Sigma C A N Aout Nout e T),
@@ -1073,7 +1232,16 @@ Theorem has_type_fresh_realign_mutual :
   (forall FDs DI tc_s G Sigma C A N Aout Nout T ps
       (HT : pats_have_type FDs DI tc_s G Sigma C A N Aout Nout T ps),
       pats_fresh_realign_case FDs DI tc_s G Sigma C A N Aout Nout T ps HT).
-Admitted.
+Proof.
+  destruct has_type_fresh_outputs_mutual as [Hex [Hpat Hps]].
+  repeat split.
+  - intros FDs DI G Sigma C A N Aout Nout e T HT Aoutf Noutf Hfresh.
+    destruct (Hex _ _ _ _ _ _ _ _ _ _ _ HT _ _ Hfresh). subst. exact Hfresh.
+  - intros FDs DI tc_s G Sigma C A N Aout Nout T p HT Aoutf Noutf Hfresh.
+    destruct (Hpat _ _ _ _ _ _ _ _ _ _ _ _ HT _ _ Hfresh). subst. exact Hfresh.
+  - intros FDs DI tc_s G Sigma C A N Aout Nout T ps HT Aoutf Noutf Hfresh.
+    destruct (Hps _ _ _ _ _ _ _ _ _ _ _ _ HT _ _ Hfresh). subst. exact Hfresh.
+Qed.
 
 Corollary expr_has_type_fresh_realign :
   forall FDs DI G Sigma C A N Aout Nout e T,
@@ -1081,7 +1249,11 @@ Corollary expr_has_type_fresh_realign :
     forall Aoutf Noutf,
       has_type_fresh FDs DI G Sigma C A N Aoutf Noutf e T ->
       has_type_fresh FDs DI G Sigma C A N Aout Nout e T.
-Admitted.
+Proof.
+  intros FDs DI G Sigma C A N Aout Nout e T HT Aoutf Noutf Hfresh.
+  destruct has_type_fresh_realign_mutual as [Hex _].
+  eapply Hex; eauto.
+Qed.
 
 Lemma lookup_loc_extend_eq :
   forall M lr cl,
@@ -1381,17 +1553,86 @@ Proof.
       lia.
 Qed.
 
+Theorem end_witness_store_write_other_region_mutual :
+  (forall DI S r i K r0 j0 T j1,
+      r0 <> r ->
+      end_witness DI (store_write S r i K) (r0, j0) T (r0, j1) ->
+      end_witness DI S (r0, j0) T (r0, j1))
+  /\
+  (forall DI S r i K r0 j0 Ts j1,
+      r0 <> r ->
+      end_witness_fields DI (store_write S r i K) r0 j0 Ts j1 ->
+      end_witness_fields DI S r0 j0 Ts j1).
+Proof.
+  assert
+    (Hmut :
+      (forall DI S0 cl T cl'
+          (Hew : end_witness DI S0 cl T cl'),
+          forall S r i K,
+            S0 = store_write S r i K ->
+            fst cl <> r ->
+            end_witness DI S cl T cl')
+      /\
+      (forall DI S0 r0 j0 Ts j1
+          (Hfields : end_witness_fields DI S0 r0 j0 Ts j1),
+          forall S r i K,
+            S0 = store_write S r i K ->
+            r0 <> r ->
+            end_witness_fields DI S r0 j0 Ts j1)).
+  {
+    apply end_witness_mutind.
+    - intros DI S0 r0 j0 K0 tyc fieldtys j Hlk Hdc _ IHfields S r i K HS Hrneq.
+      subst S0.
+      econstructor.
+      + rewrite heap_lookup_store_write_neq in Hlk.
+        * exact Hlk.
+        * intro Heq. inversion Heq. contradiction.
+      + exact Hdc.
+      + eapply IHfields; eauto.
+    - intros DI S0 r0 j0 S r i K HS Hrneq.
+      subst S0. constructor.
+    - intros DI S0 r0 j0 T Ts j k _ IHew _ IHfields S r i K HS Hrneq.
+      subst S0.
+      econstructor.
+      + eapply IHew; eauto.
+      + eapply IHfields; eauto.
+  }
+  split.
+  - intros DI S r i K r0 j0 T j1 Hrneq Hew.
+    destruct Hmut as [Hew_mut _].
+    eapply Hew_mut with (S := S) (r := r) (i := i) (K := K).
+    + exact Hew.
+    + reflexivity.
+    + exact Hrneq.
+  - intros DI S r i K r0 j0 Ts j1 Hrneq Hfields.
+    destruct Hmut as [_ Hfields_mut].
+    eapply Hfields_mut with (S := S) (r := r) (i := i) (K := K).
+    + exact Hfields.
+    + reflexivity.
+    + exact Hrneq.
+Qed.
+
 Lemma end_witness_store_write_other_region :
   forall DI S r i K r0 j0 T j1,
     r0 <> r ->
     end_witness DI (store_write S r i K) (r0, j0) T (r0, j1) ->
-    end_witness DI S (r0, j0) T (r0, j1)
-with end_witness_fields_store_write_other_region :
+    end_witness DI S (r0, j0) T (r0, j1).
+Proof.
+  intros DI S r i K r0 j0 T j1 Hrneq Hew.
+  destruct end_witness_store_write_other_region_mutual as [H _].
+  eauto.
+Qed.
+
+Lemma end_witness_fields_store_write_other_region :
   forall DI S r i K r0 j0 Ts j1,
     r0 <> r ->
     end_witness_fields DI (store_write S r i K) r0 j0 Ts j1 ->
     end_witness_fields DI S r0 j0 Ts j1.
-Admitted.
+Proof.
+  intros DI S r i K r0 j0 Ts j1 Hrneq Hfields.
+  destruct end_witness_store_write_other_region_mutual as [_ H].
+  eauto.
+Qed.
 
 Lemma nonempty_fields_end_gt_allocptr :
   forall FDs DI G Sigma C A N M S r lf tc vh vs fields start_i,
@@ -3869,11 +4110,17 @@ Qed.
 (* the mechanization: we need an explicit invariant saying that live  *)
 (* nursery locations map to distinct concrete cells.  We keep that    *)
 (* stronger premise explicit here instead of silently assuming it.    *)
+(*                                                                    *)
+(* Likewise, D_App needs a caller-instantiation principle for         *)
+(* function bodies.  The thesis uses that lemma informally; the       *)
+(* mechanization currently exposes it explicitly as                   *)
+(* fdecl_instantiation_ok instead of hiding it inside T_FunctionDef.  *)
 (* ================================================================= *)
 
 Theorem preservation :
   forall FDs DI G Sigma C A N Aout Nout Afresh Nfresh M S e Ty S' M' e',
     Forall (fdecl_has_type FDs DI) FDs ->
+    Forall (fdecl_instantiation_ok FDs DI) FDs ->
     gamma_binders_disjoint G e ->
     nursery_locmap_injective N M ->
     has_type FDs DI G Sigma C A N Aout Nout e Ty ->
@@ -3888,10 +4135,10 @@ Theorem preservation :
       /\ conloc_extends C C'.
 Proof.
   intros FDs DI G Sigma C A N Aout Nout Afresh Nfresh M S e Ty S' M' e'
-         Hfds Hgamma Hninj Hty Hfresh Hwf Hewf Hstep.
-  revert G Ty Sigma C A N Aout Nout Afresh Nfresh Hfds Hgamma Hninj Hty Hfresh Hwf Hewf.
+         Hfds Hinsts Hgamma Hninj Hty Hfresh Hwf Hewf Hstep.
+  revert G Ty Sigma C A N Aout Nout Afresh Nfresh Hfds Hinsts Hgamma Hninj Hty Hfresh Hwf Hewf.
   induction Hstep;
-    intros G Ty Sigma C A N Aout Nout Afresh Nfresh Hfds Hgamma Hninj Hty Hfresh Hwf Hewf.
+    intros G Ty Sigma C A N Aout Nout Afresh Nfresh Hfds Hinsts Hgamma Hninj Hty Hfresh Hwf Hewf.
   - (* D_DataCon *)
     eapply has_type_datacon_inv in Hty.
     destruct Hty
@@ -3945,7 +4192,7 @@ Proof.
     }
     destruct Hewf as [Hewf1 _].
     destruct (IHHstep G (LocTy tc1 l1 r1) Sigma C A N A1 N1 A1 N1
-                      Hfds Hgamma_e1 Hninj Hty1 Hfresh1' Hwf Hewf1)
+                      Hfds Hinsts Hgamma_e1 Hninj Hty1 Hfresh1' Hwf Hewf1)
       as [Sigma' [C' [Ain' [Nin' [Hty' [Hwf' [Hse Hce]]]]]]].
     eapply preservation_let_expr_case; eauto.
   - (* D_Let_Val *)
@@ -3978,20 +4225,15 @@ Proof.
     assert (HinFD :
       In (FunDecl f f_locs' f_params' f_retty' f_regions' f_body') FDs).
     { eapply lookup_fdecl_In. exact Hlookup. }
-    assert (Hfdtyped :
-      fdecl_has_type FDs DI
+    assert (Hfdinst :
+      fdecl_instantiation_ok FDs DI
         (FunDecl f f_locs' f_params' f_retty' f_regions' f_body')).
     { eapply Forall_forall; eauto. }
     rewrite H in Hlookup. inversion Hlookup; subst; clear Hlookup.
-    inversion Hfdtyped as
-      [ ? ? ? locs0 named_args0 out0 regions0 body0
-          N'0 tc_out0 l_out0 r_out0
-          HfdIn0 Hout0 Huses0 Hret0 Hbody0 Hnotin0 Hinst ];
-      subst; clear Hfdtyped.
     cbv [instantiated_fun_body] in *.
     exists Sigma, C, A, N.
     split.
-    + eapply Hinst; eauto.
+    + exact (Hfdinst _ _ _ _ _ _ _ _ _ _ Hnur Halloc Hlen Hret Hargs).
     + split.
       * exact Hwf.
       * split.
@@ -4059,11 +4301,17 @@ Qed.
 (*   and store_wf(DI, Σ, C, A, N, M, S)                              *)
 (*   and S;M;e ⇒* Sₙ;Mₙ;eₙ                                        *)
 (*   then (∃ v, eₙ = v) ∨ (∃ S' M' e', Sₙ;Mₙ;eₙ ⇒ S';M';e')      *)
+(*                                                                    *)
+(* Meta-theory note: the current development still assumes the       *)
+(* separate fdecl_instantiation_ok principle used by preservation's   *)
+(* D_App case.  That obligation is now explicit, rather than encoded  *)
+(* inside the static function-definition rule.                        *)
 (* ================================================================= *)
 
 Theorem type_safety :
   forall FDs DI Sigma C A N A' N' Afresh Nfresh M S e T Sn Mn en,
     Forall (fdecl_has_type FDs DI) FDs ->
+    Forall (fdecl_instantiation_ok FDs DI) FDs ->
     has_type FDs DI nil Sigma C A N A' N' e T ->
     has_type_fresh FDs DI nil Sigma C A N Afresh Nfresh e T ->
     store_wf DI Sigma C A N M S ->
