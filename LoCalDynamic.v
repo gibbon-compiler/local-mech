@@ -39,6 +39,18 @@ Definition store : Type := list (region_var * heap).
    M = {l₁^r₁ ↦ ⟨r₁,i₁⟩, ..., lₙ^rₙ ↦ ⟨rₙ,iₙ⟩} *)
 Definition loc_map : Type := list (laddr * concrete_loc).
 
+(* Runtime support carried by the location map.
+   Named-mechanization refinement:
+   the thesis's Freshen(FD) side condition for D_App needs to avoid the
+   caller's live symbolic location support as well as the actual
+   arguments.  We expose that support explicitly here so the dynamic rule
+   can say what it is freshening against. *)
+Definition loc_map_laddrs (M : loc_map) : list laddr :=
+  List.map fst M.
+
+Definition loc_map_regions (M : loc_map) : list region_var :=
+  List.map snd (loc_map_laddrs M).
+
 (* ================================================================= *)
 (* Lookup operations                                                 *)
 (* ================================================================= *)
@@ -293,7 +305,9 @@ Definition subst_locs_fresh
        (loc_arg_regions actuals ++ vals_region_vars val_args)
        e).
 
-Definition subst_app_fresh
+Definition subst_app_fresh_with_support
+    (avoid_l : list laddr)
+    (avoid_r : list region_var)
     (formals actuals : list (loc_var * region_var))
     (params : list (term_var * ty))
     (val_args : list val)
@@ -301,11 +315,33 @@ Definition subst_app_fresh
   let e' :=
     freshen_expr_with
       (vals_term_vars val_args)
-      (actuals ++ vals_symbolic_laddrs val_args)
-      (loc_arg_regions actuals ++ vals_region_vars val_args)
+      (avoid_l ++ actuals ++ vals_symbolic_laddrs val_args)
+      (avoid_r ++ loc_arg_regions actuals ++ vals_region_vars val_args)
       e in
   subst_locs formals actuals
     (subst_vals (List.map fst params) val_args e').
+
+Definition subst_app_fresh
+    (formals actuals : list (loc_var * region_var))
+    (params : list (term_var * ty))
+    (val_args : list val)
+    (e : expr) : expr :=
+  subst_app_fresh_with_support nil nil formals actuals params val_args e.
+
+Definition subst_app_runtime_fresh
+    (M : loc_map)
+    (formals actuals : list (loc_var * region_var))
+    (params : list (term_var * ty))
+    (val_args : list val)
+    (e : expr) : expr :=
+  (* Dynamic-semantics refinement beyond the thesis prose:
+     Freshen(FD) must avoid the caller's current symbolic runtime support,
+     not only the actual arguments, or the named mechanization can
+     collide with live entries already present in M. *)
+  subst_app_fresh_with_support
+    (loc_map_laddrs M)
+    (loc_map_regions M)
+    formals actuals params val_args e.
 
 (* ================================================================= *)
 (* End-witness relation  (thesis §2.2.2 and Appendix §end-witness)   *)
@@ -474,13 +510,19 @@ Inductive step :
      S; M; f [l₁^r₁,...] v₁...vₘ
        ⇒  S; M; e[x₁...xₘ := v₁...vₘ][l'₁^r'₁... := l₁^r₁...]
      where  FD = Function(f),
-            (f x₁...xₘ = e) = Freshen(FD). *)
+            (f x₁...xₘ = e) = Freshen(FD).
+
+     Named-mechanization refinement:
+     the freshened body must avoid the caller's current symbolic support
+     from M as well as the actual arguments.  This makes explicit the
+     Barendregt-style freshness side condition that is only implicit in
+     the thesis text. *)
   | D_App : forall FDs DI S M f loc_args val_args
                    f_locs f_named_params f_retty f_regions f_body,
       lookup_fdecl FDs f =
         Some (FunDecl f f_locs f_named_params f_retty f_regions f_body) ->
       step FDs DI S M (e_app f loc_args val_args)
-           S M (subst_app_fresh f_locs loc_args f_named_params val_args f_body)
+           S M (subst_app_runtime_fresh M f_locs loc_args f_named_params val_args f_body)
 
   (* ---- D-Case ----
      S; M; case ⟨r,i⟩^(l^r) of [..., K (x₁:τ₁@l₁^r,...) → e, ...]

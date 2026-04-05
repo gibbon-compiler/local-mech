@@ -571,6 +571,11 @@ with expr_occurs_region_vars (e : expr) : list region_var :=
       in val_region_vars v0 ++ go pats
   end.
 
+(* Named-mechanization strengthening:
+   the thesis relies on an implicit Barendregt-style convention that
+   bound names are chosen apart.  In this development we make that
+   discipline explicit so later meta-theory can state exactly which
+   freshness/alpha-regularity assumptions are being used. *)
 Definition expr_binders_unique (e : expr) : Prop :=
   NoDup (expr_bound_term_vars e)
   /\ NoDup (expr_bound_laddrs e)
@@ -598,6 +603,50 @@ Definition fdecl_binders_unique (fd : fdecl) : Prop :=
   NoDup (fdecl_bound_term_vars fd)
   /\ NoDup (fdecl_bound_laddrs fd)
   /\ NoDup (fdecl_bound_regions fd).
+
+(* Readable aliases used by the safety development when stating the
+   explicit alpha-regularity assumptions needed by the named proof. *)
+Definition expr_alpha_regular : expr -> Prop := expr_binders_unique.
+
+Definition fdecl_alpha_regular : fdecl -> Prop := fdecl_binders_unique.
+
+(* Source/runtime split, made explicit for the named mechanization:
+   the thesis source language contains only symbolic locations.  Concrete
+   locations <r,i>^(l^r) are runtime values produced by evaluation,
+   not source syntax written inside function bodies or the main term. *)
+Definition val_symbolic_only (v0 : val) : Prop :=
+  match v0 with
+  | v_var _ => True
+  | v_cloc _ _ _ _ => False
+  end.
+
+Fixpoint expr_symbolic_only (e : expr) : Prop :=
+  match e with
+  | e_val v0 => val_symbolic_only v0
+  | e_app _ _ vs => Forall val_symbolic_only vs
+  | e_datacon _ _ _ vs => Forall val_symbolic_only vs
+  | e_let _ _ e1 e2 => expr_symbolic_only e1 /\ expr_symbolic_only e2
+  | e_letloc _ _ _ body => expr_symbolic_only body
+  | e_letregion _ body => expr_symbolic_only body
+  | e_case v0 pats =>
+      val_symbolic_only v0 /\
+      let fix pats_ok (ps : list pat) : Prop :=
+        match ps with
+        | nil => True
+        | pat_clause _ _ body :: ps' =>
+            expr_symbolic_only body /\ pats_ok ps'
+        end
+      in pats_ok pats
+  end.
+
+Definition fdecl_symbolic_only (fd : fdecl) : Prop :=
+  match fd with
+  | FunDecl _ _ _ _ _ body => expr_symbolic_only body
+  end.
+
+Definition program_symbolic_only (p : program) : Prop :=
+  Forall fdecl_symbolic_only (prog_fdecls p)
+  /\ expr_symbolic_only (prog_main p).
 
 Fixpoint tick_marks (n : nat) : string :=
   match n with
@@ -1020,5 +1069,7 @@ Definition app_subst_fresh
 Definition program_binders_unique (p : program) : Prop :=
   Forall fdecl_binders_unique (prog_fdecls p)
   /\ expr_binders_unique (prog_main p).
+
+Definition program_alpha_regular : program -> Prop := program_binders_unique.
 
 End LoCalSyntax.

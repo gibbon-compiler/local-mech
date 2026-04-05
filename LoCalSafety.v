@@ -1126,6 +1126,162 @@ Proof.
   inversion Hin.
 Qed.
 
+(* The thesis source language is symbolic-only.  Once we make that
+   source/runtime split explicit, source expressions are automatically
+   expr_wf under any loc-map because they contain no raw concrete
+   locations. *)
+Lemma val_symbolic_only_val_wf_any :
+  forall M v0,
+    val_symbolic_only v0 ->
+    val_wf M v0.
+Proof.
+  intros M v0 Hsym.
+  destruct v0; simpl in *; try contradiction; trivial.
+Qed.
+
+Lemma expr_symbolic_only_expr_wf_any :
+  forall M e,
+    expr_symbolic_only e ->
+    expr_wf M e.
+Proof.
+  intros M e.
+  revert e.
+  fix IH 1.
+  intros [v0 | f locs vs | dc l r vs | x T e1 e2 | l r le body
+        | r body | scrut pats]; simpl; intro Hsym.
+  - eapply val_symbolic_only_val_wf_any. exact Hsym.
+  - induction Hsym.
+    + constructor.
+    + constructor.
+      * eapply val_symbolic_only_val_wf_any. exact H.
+      * exact IHHsym.
+  - induction Hsym.
+    + constructor.
+    + constructor.
+      * eapply val_symbolic_only_val_wf_any. exact H.
+      * exact IHHsym.
+  - destruct Hsym as [H1 H2]. split.
+    + eapply IH. exact H1.
+    + eapply IH. exact H2.
+  - eapply IH. exact Hsym.
+  - eapply IH. exact Hsym.
+  - destruct Hsym as [Hscrut Hpats]. split.
+    + eapply val_symbolic_only_val_wf_any. exact Hscrut.
+    + revert Hpats.
+      induction pats as [| [K binds body] ps IHps]; simpl; intro Hps.
+      * exact I.
+      * destruct Hps as [Hbody Hps']. split.
+        -- eapply IH. exact Hbody.
+        -- eapply IHps. exact Hps'.
+Qed.
+
+Lemma NoDup_app_cross :
+  forall (A : Type) (xs ys : list A) (x : A),
+    NoDup (xs ++ ys) ->
+    In x xs ->
+    ~ In x ys.
+Proof.
+  intros A xs.
+  induction xs as [| a xs IH]; intros ys x Hnd Hin; simpl in *.
+  - contradiction.
+  - inversion Hnd; subst.
+    rename H1 into Hnotin_tail.
+    destruct Hin as [Heq | Hin].
+    + subst a. intro HinY.
+      apply Hnotin_tail. apply in_or_app. right. exact HinY.
+    + eapply IH; eauto.
+Qed.
+
+Lemma NoDup_app_left :
+  forall (A : Type) (xs ys : list A),
+    NoDup (xs ++ ys) ->
+    NoDup xs.
+Proof.
+  intros A xs.
+  induction xs as [| a xs IH]; intros ys Hnd; simpl in *.
+  - constructor.
+  - inversion Hnd; subst.
+    constructor.
+    + intro Hin.
+      apply H1. apply in_or_app. left. exact Hin.
+    + eapply IH. exact H2.
+Qed.
+
+Lemma NoDup_app_right :
+  forall (A : Type) (xs ys : list A),
+    NoDup (xs ++ ys) ->
+    NoDup ys.
+Proof.
+  intros A xs.
+  induction xs as [| a xs IH]; intros ys Hnd; simpl in *.
+  - exact Hnd.
+  - inversion Hnd; subst.
+    eapply IH. exact H2.
+Qed.
+
+Lemma expr_alpha_regular_let_inv :
+  forall x T e1 e2,
+    expr_alpha_regular (e_let x T e1 e2) ->
+    expr_alpha_regular e1
+    /\ expr_alpha_regular e2
+    /\ (forall y,
+          In y (expr_bound_term_vars e1) ->
+          ~ In y (expr_bound_term_vars e2))
+    /\ (forall lr,
+          In lr (expr_bound_laddrs e1) ->
+          ~ In lr (expr_bound_laddrs e2))
+    /\ (forall r,
+          In r (expr_bound_regions e1) ->
+          ~ In r (expr_bound_regions e2)).
+Proof.
+  intros x T e1 e2 [Hterms [Hladdrs Hregions]].
+  simpl in Hterms, Hladdrs, Hregions.
+  assert (Hterms_tail :
+    NoDup (expr_bound_term_vars e2)).
+  { assert (Hx_tail : NoDup (x :: expr_bound_term_vars e2)).
+    { eapply NoDup_app_right. exact Hterms. }
+    inversion Hx_tail; subst. exact H2. }
+  split.
+  - split.
+    + eapply NoDup_app_left. exact Hterms.
+    + split.
+      * eapply NoDup_app_left. exact Hladdrs.
+      * eapply NoDup_app_left. exact Hregions.
+  - split.
+    + split.
+      * exact Hterms_tail.
+      * split.
+        -- eapply NoDup_app_right. exact Hladdrs.
+        -- eapply NoDup_app_right. exact Hregions.
+	    + split.
+	      * intros y Hin1 Hin2.
+	        eapply (NoDup_app_cross _ (expr_bound_term_vars e1)
+	                  (x :: expr_bound_term_vars e2) y Hterms Hin1).
+	        simpl. right. exact Hin2.
+	      * split.
+	        -- intros lr Hin1 Hin2.
+	           eapply (NoDup_app_cross laddr
+	                     (expr_bound_laddrs e1)
+	                     (expr_bound_laddrs e2)
+	                     lr Hladdrs Hin1 Hin2).
+	        -- intros r Hin1 Hin2.
+	           eapply (NoDup_app_cross region_var
+	                     (expr_bound_regions e1)
+	                     (expr_bound_regions e2)
+	                     r Hregions Hin1 Hin2).
+Qed.
+
+Lemma fdecl_alpha_regular_inv :
+  forall f locs named_args out regions body,
+    fdecl_alpha_regular (FunDecl f locs named_args out regions body) ->
+    NoDup (List.map fst named_args ++ expr_bound_term_vars body)
+    /\ NoDup (locs ++ expr_bound_laddrs body)
+    /\ NoDup (regions ++ expr_bound_regions body).
+Proof.
+  intros f locs named_args out regions body Halpha.
+  exact Halpha.
+Qed.
+
 Lemma expr_term_capture_safe_let_inv :
   forall x T e1 e2,
     expr_term_capture_safe (e_let x T e1 e2) ->
@@ -1257,9 +1413,122 @@ with pats_have_type_fresh :
         pats_have_type_fresh FDs DI tc_s G Sigma C A N A' N' t ps ->
         pats_have_type_fresh FDs DI tc_s G Sigma C A N A' N' t (cons p ps).
 
+(* Freshness-side companion to fdecl_instantiation_ok:
+   preservation itself only needs ordinary typing of the instantiated
+   function body, but iterating preservation in type_safety also needs
+   the proof-side binder-freshness judgment on the D_App reduct.  The
+   thesis uses Freshen(FD) informally at this point; the named
+   mechanization exposes the corresponding meta-level obligation
+   explicitly here instead of hiding it in the final theorem. *)
+Definition fdecl_instantiation_fresh_ok
+    (FDs : fun_env) (DI : datacon_info) (fd : fdecl) : Prop :=
+  match fd with
+  | FunDecl _ locs named_args out _ body =>
+      forall G Sigma C A N avoid_l avoid_r lrs vs tc l r,
+        In (l, r) N ->
+        In (r, AP_Loc (l, r)) A ->
+        List.length lrs = List.length locs ->
+        subst_locs_in_ty locs lrs out = LocTy tc l r ->
+        app_vals_have_type FDs DI G Sigma C A N locs lrs vs named_args ->
+        has_type_fresh FDs DI G Sigma C A N
+          A (remove_nursery N (l, r))
+          (instantiated_fun_body_with_support
+             avoid_l avoid_r locs lrs named_args vs body)
+          (LocTy tc l r)
+  end.
+
 Scheme has_type_fresh_ind' := Induction for has_type_fresh Sort Prop
 with pat_has_type_fresh_ind' := Induction for pat_has_type_fresh Sort Prop
 with pats_have_type_fresh_ind' := Induction for pats_have_type_fresh Sort Prop.
+
+Combined Scheme has_type_fresh_mutind
+  from has_type_fresh_ind', pat_has_type_fresh_ind', pats_have_type_fresh_ind'.
+
+Theorem has_type_fresh_tenv_irrelevant_mutual :
+  (forall FDs DI G Sigma C A N A' N' e T
+      (HF : has_type_fresh FDs DI G Sigma C A N A' N' e T),
+      forall G',
+        has_type_fresh FDs DI G' Sigma C A N A' N' e T)
+  /\
+  (forall FDs DI tc_s G Sigma C A N A' N' T p
+      (HF : pat_has_type_fresh FDs DI tc_s G Sigma C A N A' N' T p),
+      forall G',
+        pat_has_type_fresh FDs DI tc_s G' Sigma C A N A' N' T p)
+  /\
+  (forall FDs DI tc_s G Sigma C A N A' N' T ps
+      (HF : pats_have_type_fresh FDs DI tc_s G Sigma C A N A' N' T ps),
+      forall G',
+        pats_have_type_fresh FDs DI tc_s G' Sigma C A N A' N' T ps).
+Proof.
+  eapply has_type_fresh_mutind.
+  - intros. constructor.
+  - intros. constructor.
+  - intros FDs DI G Sigma C A N A' N' A'' N'' x e1 e2 tc1 l1 r1 tc2 l2 r2
+      Hf1 IH1 Hf2 IH2 G'.
+    eapply TF_Let.
+    + eapply IH1.
+    + eapply IH2.
+  - intros FDs DI G Sigma C A N A' N' r e t Hfresh Hbody IH G'.
+    eapply TF_LRegion.
+    + exact Hfresh.
+    + eapply IH.
+  - intros FDs DI G Sigma C A N A'' N'' l r e tc' l' r' Hfreshctx Hbody IH G'.
+    eapply TF_LLStart.
+    + exact Hfreshctx.
+    + eapply IH.
+  - intros FDs DI G Sigma C A N A'' N'' l lprev r e tc'' l'' r'' Hfreshctx Hbody IH G'.
+    eapply TF_LLTag.
+    + exact Hfreshctx.
+    + eapply IH.
+  - intros FDs DI G Sigma C A N A'' N'' l l1 r tc_prev e tc' l' r' Hfreshctx Hbody IH G'.
+    eapply TF_LLAfter.
+    + exact Hfreshctx.
+    + eapply IH.
+  - intros FDs DI G Sigma C A N dc l r vs tc fieldtcs fields G'.
+    exact (TF_DataCon FDs DI G' Sigma C A N dc l r vs tc fieldtcs fields).
+  - intros FDs DI G Sigma C A N f lrs vs tc l r f_locs f_params f_retty f_regions f_body G'.
+    exact (TF_App FDs DI G' Sigma C A N f lrs vs tc l r
+            f_locs f_params f_retty f_regions f_body).
+  - intros FDs DI G Sigma C A N A' N' scrut ps tc_s l_s r_s t
+      Hcasefresh Hps IHps G'.
+    exact (TF_Case FDs DI G' Sigma C A N A' N' scrut ps tc_s l_s r_s t
+             Hcasefresh (IHps G')).
+  - intros FDs DI tc_s G Sigma C A N A' N' dc binds body tc fieldtcs tc_res l r
+      Hbody IHbody G'.
+    exact (TF_Pat FDs DI tc_s G' Sigma C A N A' N'
+             dc binds body tc fieldtcs tc_res l r
+             (IHbody (extend_tenv_list G' binds))).
+  - intros FDs DI tc_s G Sigma C A N t G'.
+    apply TF_PatsNil.
+  - intros FDs DI tc_s G Sigma C A N A' N' t p ps Hpat IHpat Hps IHps G'.
+    exact (TF_PatsCons FDs DI tc_s G' Sigma C A N A' N' t p ps
+             (IHpat G') (IHps G')).
+Qed.
+
+Corollary expr_has_type_fresh_tenv_irrelevant :
+  forall FDs DI G Sigma C A N A' N' e T,
+    has_type_fresh FDs DI G Sigma C A N A' N' e T ->
+    forall G',
+      has_type_fresh FDs DI G' Sigma C A N A' N' e T.
+Proof.
+  intros FDs DI G Sigma C A N A' N' e T HF G'.
+  destruct has_type_fresh_tenv_irrelevant_mutual as [Hex _].
+  eapply Hex; eauto.
+Qed.
+
+Lemma pats_have_type_fresh_In :
+  forall FDs DI tc_s G Sigma C A N A' N' T ps p,
+    pats_have_type_fresh FDs DI tc_s G Sigma C A N A' N' T ps ->
+    In p ps ->
+    pat_has_type_fresh FDs DI tc_s G Sigma C A N A' N' T p.
+Proof.
+  intros FDs DI tc_s G Sigma C A N A' N' T ps p Hfresh Hin.
+  induction Hfresh.
+  - contradiction.
+  - simpl in Hin. destruct Hin as [Heq | Hin].
+    + subst. exact H.
+    + eapply IHHfresh; exact Hin.
+Qed.
 
 Lemma pat_has_type_fresh_tc_irrel :
   forall FDs DI tc_s G Sigma C A N A' N' T p,
@@ -4240,6 +4509,39 @@ Proof.
   eapply Hex with (prefix := prefix) (z := x) (uty := vty) (Gamma := Gamma) (s := v0); eauto.
 Qed.
 
+Lemma typed_nil_value_has_type_fresh :
+  forall FDs DI Sigma C A N vl T,
+    has_type FDs DI nil Sigma C A N A N (e_val vl) T ->
+    has_type_fresh FDs DI nil Sigma C A N A N (e_val vl) T.
+Proof.
+  intros FDs DI Sigma C A N vl T Hty.
+  inversion Hty; subst; simpl in *.
+  - discriminate.
+  - constructor.
+Qed.
+
+Lemma value_has_type_fresh :
+  forall FDs DI G Sigma C A N vl T,
+    has_type FDs DI G Sigma C A N A N (e_val vl) T ->
+    has_type_fresh FDs DI G Sigma C A N A N (e_val vl) T.
+Proof.
+  intros FDs DI G Sigma C A N vl T Hty.
+  inversion Hty; subst; simpl in *.
+  - constructor.
+  - constructor.
+Qed.
+
+Lemma typed_nil_value_has_type_fresh_any_context :
+  forall FDs DI G Sigma C A N vl T,
+    has_type FDs DI nil Sigma C A N A N (e_val vl) T ->
+    has_type_fresh FDs DI G Sigma C A N A N (e_val vl) T.
+Proof.
+  intros FDs DI G Sigma C A N vl T Hty.
+  pose proof (typed_nil_value_has_type_fresh FDs DI Sigma C A N vl T Hty) as HF.
+  exact (expr_has_type_fresh_tenv_irrelevant
+           FDs DI nil Sigma C A N A N (e_val vl) T HF G).
+Qed.
+
 Lemma subst_case_bindings :
   forall FDs DI G Sigma0 C A N Aout Nout rc binds indices body T,
     NoDup (pat_term_vars binds) ->
@@ -4753,7 +5055,8 @@ Qed.
 (* Likewise, D_App needs a caller-instantiation principle for         *)
 (* function bodies.  The thesis uses that lemma informally; the       *)
 (* mechanization currently exposes it explicitly as                   *)
-(* fdecl_instantiation_ok instead of hiding it inside T_FunctionDef.  *)
+(* fdecl_instantiation_ok, strengthened so Freshen(FD) may avoid      *)
+(* additional caller support beyond the actual arguments.             *)
 (* ================================================================= *)
 
 Theorem preservation :
@@ -4872,7 +5175,10 @@ Proof.
     cbv [instantiated_fun_body] in *.
     exists Sigma, C, A, N.
     split.
-    + exact (Hfdinst _ _ _ _ _ _ _ _ _ _ Hnur Halloc Hlen Hret Hargs).
+    + exact (Hfdinst G Sigma C A N
+               (loc_map_laddrs M) (loc_map_regions M)
+               loc_args val_args tc l r
+               Hnur Halloc Hlen Hret Hargs).
     + split.
       * exact Hwf.
       * split.
@@ -4952,10 +5258,11 @@ Qed.
 (* This is not just tactic debt. In a named presentation, D_Let_Expr  *)
 (* can extend Sigma/C with locations introduced while evaluating e1,  *)
 (* and D_App can introduce binders from a freshened function body.    *)
-(* To derive a genuine theorem here, the development still needs an   *)
-(* explicit alpha-regularity invariant for programs/contexts and a    *)
-(* proved bridge showing that Freshen(FD) avoids the current runtime  *)
-(* support, not only the actual arguments.                            *)
+(* The dynamic semantics now makes the D_App side explicit by         *)
+(* freshening against the caller's current loc-map support.  The      *)
+(* remaining theorem gap is therefore the proof that these explicit    *)
+(* freshness obligations are preserved across steps, not an ambiguity  *)
+(* about what Freshen(FD) is supposed to avoid.                       *)
 (*                                                                    *)
 (* We therefore expose the combined one-step obligation below instead *)
 (* of silently claiming the stronger thesis theorem in this named     *)
