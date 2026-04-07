@@ -20,3 +20,18 @@ jobs:
         run: |
           set -eux
           rocq makefile -f _CoqProject -o Makefile && make
+
+  dead-code:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Check for dead code
+        run: |
+          python3 scripts/find_dead_code.py \
+            --allowlist scripts/dead_code_allowlist.txt \
+            --error-on-dead
