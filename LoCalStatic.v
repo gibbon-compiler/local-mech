@@ -4,7 +4,9 @@ From Stdlib Require Import List.
 Import ListNotations.
 From Stdlib Require Import Strings.String.
 From LocalMech Require Import LoCalSyntax.
+From LocalMech Require Import LoCalDynamic.
 Import LoCalSyntax.LoCalSyntax.
+Import LoCalDynamic.LoCalDynamic.
 
 Module LoCalStatic.
 
@@ -38,6 +40,13 @@ Definition fun_env : Type := list fdecl.
 
 (* ---- Environment operations ---- *)
 
+Fixpoint lookup_tenv (G : type_env) (x : term_var) : option located_type :=
+  match G with
+  | nil => None
+  | (y, t) :: G' =>
+      if term_var_eq_dec x y then Some t else lookup_tenv G' x
+  end.
+
 Definition extend_tenv (G : type_env) (x : term_var) (t : located_type)
   : type_env := cons (x, t) G.
 
@@ -47,8 +56,14 @@ Definition extend_store (S0 : store_type) (lr : laddr) (tc : tycon)
 Definition extend_conloc (C0 : conloc_env) (lr : laddr) (le : loc_exp)
   : conloc_env := cons (lr, le) C0.
 
+Definition remove_alloc_region (A0 : alloc_env) (r : region_var) : alloc_env :=
+  filter
+    (fun entry =>
+       if region_var_eq_dec (fst entry) r then false else true)
+    A0.
+
 Definition extend_alloc (A0 : alloc_env) (r : region_var) (ap : alloc_ptr)
-  : alloc_env := cons (r, ap) A0.
+  : alloc_env := cons (r, ap) (remove_alloc_region A0 r).
 
 Definition extend_nursery (N0 : nursery) (lr : laddr) : nursery :=
   cons lr N0.
@@ -64,17 +79,6 @@ Fixpoint extend_tenv_list (G : type_env) (binds : list (term_var * located_type)
   | cons bnd rest => extend_tenv_list (cons bnd G) rest
   end.
 
-(* Extract store-type entries from pattern bindings:
-   (x, T@l^r) ↦ ((l,r), T). *)
-Definition bind_to_store_entry (b : term_var * ty) : laddr * tycon :=
-  match snd b with
-  | loc_ty tc lv rv => ((lv, rv), tc)
-  end.
-
-Definition binds_to_store_entries (binds : list (term_var * ty))
-  : list (laddr * tycon) :=
-  map bind_to_store_entry binds.
-
 Fixpoint extend_store_list (S0 : store_type) (entries : list (laddr * tycon))
   : store_type :=
   match entries with
@@ -87,7 +91,149 @@ Definition params_to_tenv (params : list (term_var * located_type))
   : type_env := params.
 
 Definition params_to_store (params : list (term_var * located_type))
-  : store_type := map bind_to_store_entry params.
+  : store_type := map bind_store_entry params.
+
+Definition field_layout_entry : Type := (loc_var * tycon)%type.
+
+Definition field_type_at (r : region_var) (fld : field_layout_entry) : located_type :=
+  LocTy (snd fld) (fst fld) r.
+
+Fixpoint constructor_layout
+    (C : conloc_env) (root_l : loc_var) (r : region_var)
+    (prev_tc : option tycon) (fields : list field_layout_entry) : Prop :=
+  match fields with
+  | nil => True
+  | (lf, tc) :: fields' =>
+      (match prev_tc with
+       | None => In ((lf, r), LE_Next root_l r) C
+       | Some tc_prev => In ((lf, r), LE_After tc_prev root_l r) C
+       end)
+      /\ constructor_layout C lf r (Some tc) fields'
+  end.
+
+Fixpoint constructor_focus_loc
+    (root_l : loc_var) (fields : list field_layout_entry) : loc_var :=
+  match fields with
+  | nil => root_l
+  | (lf, _) :: fields' => constructor_focus_loc lf fields'
+  end.
+
+Definition type_mentions_loc (lr : laddr) (t : located_type) : Prop :=
+  match t with
+  | LocTy _ l r => In (l, r) [lr]
+  end.
+
+Definition type_uses_formal_locs (locs : list laddr) (t : located_type) : Prop :=
+  match t with
+  | LocTy _ l r => In (l, r) locs
+  end.
+
+Definition bind_uses_formal_locs (locs : list laddr) (b : term_var * ty) : Prop :=
+  type_uses_formal_locs locs (snd b).
+
+Definition instantiated_param_type
+    (formals actuals : list laddr) (param : term_var * ty) : located_type :=
+  subst_locs_in_ty formals actuals (snd param).
+
+(* This is pure syntactic instantiation for function bodies.  The
+   support-parameterized variant below matches the refined D_App
+   Freshen(FD) story: the caller may ask for freshness not only against
+   the actual arguments, but also against additional symbolic support
+   already live in the runtime state.  The zero-support wrapper remains
+   the ordinary caller-instantiation used by the static meta-theory when
+   no extra runtime support needs to be mentioned explicitly. *)
+Definition instantiated_fun_body_with_support
+    (avoid_l : list laddr)
+    (avoid_r : list region_var)
+    (formals actuals : list laddr)
+    (params : list (term_var * ty))
+    (val_args : list val)
+    (body : expr) : expr :=
+  subst_app_fresh_with_support avoid_l avoid_r
+    formals actuals params val_args body.
+
+Definition instantiated_fun_body
+    (formals actuals : list laddr)
+    (params : list (term_var * ty))
+    (val_args : list val)
+    (body : expr) : expr :=
+  instantiated_fun_body_with_support nil nil
+    formals actuals params val_args body.
+
+Definition fresh_region (A : alloc_env) (r : region_var) : Prop :=
+  forall ap, ~ In (r, ap) A.
+
+Definition fresh_laddr_store (S0 : store_type) (lr : laddr) : Prop :=
+  forall tc, ~ In (lr, tc) S0.
+
+Definition fresh_laddr_conloc (C : conloc_env) (lr : laddr) : Prop :=
+  forall le, ~ In (lr, le) C.
+
+Definition store_laddrs (S0 : store_type) : list laddr :=
+  List.map fst S0.
+
+Definition locexp_laddrs (le : loc_exp) : list laddr :=
+  match le with
+  | LE_Start _ => nil
+  | LE_Next l r => [(l, r)]
+  | LE_After _ l r => [(l, r)]
+  end.
+
+Definition conloc_support (C : conloc_env) : list laddr :=
+  flat_map
+    (fun entry =>
+       let '(lr, le) := entry in
+       lr :: locexp_laddrs le)
+    C.
+
+Definition alloc_laddrs (A : alloc_env) : list laddr :=
+  flat_map
+    (fun entry =>
+       match snd entry with
+       | AP_None => nil
+       | AP_Loc lr => [lr]
+       end)
+    A.
+
+Definition letloc_fresh_ctx
+    (S0 : store_type) (C : conloc_env) (A : alloc_env) (N : nursery)
+    (lr : laddr) : Prop :=
+  ~ In lr (store_laddrs S0)
+  /\ ~ In lr (conloc_support C)
+  /\ ~ In lr (alloc_laddrs A)
+  /\ ~ In lr N.
+
+Definition pat_bindings_wf
+    (r_scrut : region_var)
+    (binds : list (term_var * ty)) : Prop :=
+  NoDup (pat_term_vars binds)
+  /\ NoDup (pat_laddrs binds)
+  /\ Forall (fun b => bind_region_var b = r_scrut) binds.
+
+Definition pat_bindings_fresh_ctx
+    (S0 : store_type) (C : conloc_env) (A : alloc_env) (N : nursery)
+    (binds : list (term_var * ty)) : Prop :=
+  Forall (letloc_fresh_ctx S0 C A N) (pat_laddrs binds).
+
+Definition pats_case_wf
+    (r_scrut : region_var)
+    (ps : list pat) : Prop :=
+  Forall
+    (fun p =>
+       match p with
+       | pat_clause _ binds _ => pat_bindings_wf r_scrut binds
+       end)
+    ps.
+
+Definition pats_case_fresh_ctx
+    (S0 : store_type) (C : conloc_env) (A : alloc_env) (N : nursery)
+    (ps : list pat) : Prop :=
+  Forall
+    (fun p =>
+       match p with
+       | pat_clause _ binds _ => pat_bindings_fresh_ctx S0 C A N binds
+       end)
+    ps.
 
 (* Pattern coverage: every constructor of type tc in DI has a pattern. *)
 Definition pats_cover (DI : datacon_info) (tc : tycon) (pats : list pat) : Prop :=
@@ -125,7 +271,7 @@ Inductive has_type :
      Γ;Σ;C;A;N ⊢ A;N; x : τ@l^r       *)
   | T_Var :
       forall FDs DI G S0 C A N x tc l r,
-        In (x, LocTy tc l r) G ->
+        lookup_tenv G x = Some (LocTy tc l r) ->
         In ((l, r), tc) S0 ->
         has_type FDs DI G S0 C A N A N (e_val (v_var x)) (LocTy tc l r)
 
@@ -161,6 +307,7 @@ Inductive has_type :
      Γ;Σ;C;A;N ⊢ A'';N'; letregion r in e : τ *)
   | T_LRegion :
       forall FDs DI G S0 C A N A' N' r e t,
+        fresh_region A r ->
         has_type FDs DI G S0 C (extend_alloc A r AP_None) N A' N' e t ->
         has_type FDs DI G S0 C A N A' N' (e_letregion r e) t
 
@@ -239,12 +386,14 @@ Inductive has_type :
      where A' = A ∪ {r ↦ (l,r)},  N' = N − {(l,r)} *)
   | T_DataCon :
       forall FDs DI G S0 C A N (dc : datacon) (l : loc_var) (r : region_var)
-             (vs : list val) (tc : tycon) (fieldtcs : list tycon),
-        In (dc, (tc, fieldtcs)) DI ->
+             (vs : list val) (tc : tycon) (fieldtcs : list tycon)
+             (fields : list field_layout_entry),
+        lookup_datacon DI dc = Some (tc, fieldtcs) ->
         In (l, r) N ->
-        List.length vs = List.length fieldtcs ->
-        (* TODO: alloc-pointer chain, conloc chain,
-           and individual field value typing premises *)
+        map snd fields = fieldtcs ->
+        constructor_layout C l r None fields ->
+        In (r, AP_Loc (constructor_focus_loc l fields, r)) A ->
+        field_vals_have_type FDs DI G S0 C A N r vs fields ->
         has_type FDs DI G S0 C A N
                  (extend_alloc A r (AP_Loc (l, r)))
                  (remove_nursery N (l, r))
@@ -264,13 +413,16 @@ Inductive has_type :
              (lrs : list (loc_var * region_var)) (vs : list val)
              (tc : tycon) (l : loc_var) (r : region_var)
              f_locs f_params f_retty f_regions f_body,
-        In (FunDecl f f_locs f_params f_retty f_regions f_body) FDs ->
+        (* The thesis treats FDs as a function environment/map, and
+           D_App steps by lookup, so typing applications should use the
+           same map-style view rather than bare list membership. *)
+        lookup_fdecl FDs f =
+          Some (FunDecl f f_locs f_params f_retty f_regions f_body) ->
         In (l, r) N ->
         In (r, AP_Loc (l, r)) A ->
         List.length lrs = List.length f_locs ->
-        List.length vs = List.length f_params ->
-        (* TODO: location-instantiation correspondence,
-           individual value typing *)
+        subst_locs_in_ty f_locs lrs f_retty = LocTy tc l r ->
+        app_vals_have_type FDs DI G S0 C A N f_locs lrs vs f_params ->
         has_type FDs DI G S0 C A N
                  A (remove_nursery N (l, r))
                  (e_app f lrs vs) (LocTy tc l r)
@@ -285,8 +437,59 @@ Inductive has_type :
         has_type FDs DI G S0 C A N A N
                  (e_val scrut) (LocTy tc_s l_s r_s) ->
         pats_cover DI tc_s ps ->
+        pats_case_wf r_s ps ->
         pats_have_type FDs DI tc_s G S0 C A N A' N' t ps ->
         has_type FDs DI G S0 C A N A' N' (e_case scrut ps) t
+
+(* Constructor-field typing used by T_DataCon. *)
+with field_vals_have_type :
+  fun_env -> datacon_info ->
+  type_env -> store_type -> conloc_env ->
+  alloc_env -> nursery ->
+  region_var -> list val -> list field_layout_entry -> Prop :=
+
+  | T_FieldValsNil :
+      forall (FDs : fun_env) (DI : datacon_info)
+             (G : type_env) (S0 : store_type) (C : conloc_env)
+             (A : alloc_env) (N : nursery) (r : region_var),
+        field_vals_have_type FDs DI G S0 C A N r nil nil
+
+  | T_FieldValsCons :
+      forall (FDs : fun_env) (DI : datacon_info)
+             (G : type_env) (S0 : store_type) (C : conloc_env)
+             (A : alloc_env) (N : nursery) (r : region_var)
+             (vl : val) (fld : field_layout_entry)
+             (vs : list val) (flds : list field_layout_entry),
+        has_type FDs DI G S0 C A N A N (e_val vl) (field_type_at r fld) ->
+        field_vals_have_type FDs DI G S0 C A N r vs flds ->
+        field_vals_have_type FDs DI G S0 C A N r (vl :: vs) (fld :: flds)
+
+(* Function-argument typing used by T_App. *)
+with app_vals_have_type :
+  fun_env -> datacon_info ->
+  type_env -> store_type -> conloc_env ->
+  alloc_env -> nursery ->
+  list laddr -> list laddr -> list val -> list (term_var * ty) -> Prop :=
+
+  | T_AppValsNil :
+      forall (FDs : fun_env) (DI : datacon_info)
+             (G : type_env) (S0 : store_type) (C : conloc_env)
+             (A : alloc_env) (N : nursery)
+             (formals actuals : list laddr),
+        app_vals_have_type FDs DI G S0 C A N formals actuals nil nil
+
+  | T_AppValsCons :
+      forall (FDs : fun_env) (DI : datacon_info)
+             (G : type_env) (S0 : store_type) (C : conloc_env)
+             (A : alloc_env) (N : nursery)
+             (formals actuals : list laddr)
+             (vl : val) (param : term_var * ty)
+             (vs : list val) (params : list (term_var * ty)),
+        has_type FDs DI G S0 C A N A N (e_val vl)
+          (instantiated_param_type formals actuals param) ->
+        app_vals_have_type FDs DI G S0 C A N formals actuals vs params ->
+        app_vals_have_type FDs DI G S0 C A N formals actuals
+          (vl :: vs) (param :: params)
 
 (* Pattern judgment:  τ_s; Γ; Σ; C; A; N ⊢_pat A'; N'; pat : τ
    τ_s is the scrutinee's type constructor. *)
@@ -314,7 +517,7 @@ with pat_has_type :
         In ((l, r), tc_res) S0 ->
         has_type FDs DI
                  (extend_tenv_list G binds)
-                 (extend_store_list S0 (binds_to_store_entries binds))
+                 (extend_store_list S0 (pat_store_entries binds))
                  C A N A' N' body (LocTy tc_res l r) ->
         pat_has_type FDs DI tc_s G S0 C A N A' N'
                      (LocTy tc_res l r) (pat_clause dc binds body)
@@ -332,22 +535,34 @@ with pats_have_type :
         pats_have_type FDs DI tc_s G S0 C A N A N t nil
 
   | T_PatsCons :
-      forall FDs DI tc_s G S0 C A N A1 N1 A2 N2 t p ps,
-        pat_has_type FDs DI tc_s G S0 C A N A1 N1 t p ->
-        pats_have_type FDs DI tc_s G S0 C A1 N1 A2 N2 t ps ->
-        pats_have_type FDs DI tc_s G S0 C A N A2 N2 t (cons p ps).
+      (* Branches are alternatives, not sequential effects.
+         So every branch is checked against the same input/output
+         allocation environments for the enclosing case. *)
+      forall FDs DI tc_s G S0 C A N A' N' t p ps,
+        pat_has_type FDs DI tc_s G S0 C A N A' N' t p ->
+        pats_have_type FDs DI tc_s G S0 C A N A' N' t ps ->
+        pats_have_type FDs DI tc_s G S0 C A N A' N' t (cons p ps).
 
 (* ---- T-FunctionDef (thesis: \tfunctiondef) ----
    Γ;Σ;C;A;N ⊢ A;N'; body : τ@l^r    (l,r) ∉ N'
    where Γ = {x_i ↦ arg_i}, Σ = {(l_i,r_i) ↦ tc_i} from args,
-         C = ∅,  A = {r_out ↦ (l_out,r_out)},  N = {(l_out,r_out)}
-   [+ location-param correspondence — see thesis] *)
+   C = ∅,  A = {r_out ↦ (l_out,r_out)},  N = {(l_out,r_out)}
+   [+ location-param correspondence — see thesis]
+
+   Thesis alignment note:
+   this rule only states the standalone typing fact for the function
+   body, which is the static rule the thesis presents.  The caller-side
+   instantiation principle needed by D_App is tracked separately below
+   as an explicit meta-theoretic obligation, rather than being baked
+   into the static semantics itself. *)
 Inductive fdecl_has_type : fun_env -> datacon_info -> fdecl -> Prop :=
   | T_FunctionDef :
       forall FDs DI f locs (named_args : list (term_var * ty)) out regions body
              N' tc_out l_out r_out,
         In (FunDecl f locs named_args out regions body) FDs ->
         out = LocTy tc_out l_out r_out ->
+        Forall (bind_uses_formal_locs locs) named_args ->
+        type_uses_formal_locs locs out ->
         (* Build initial environments from parameters. *)
         has_type FDs DI
                  named_args
@@ -360,6 +575,31 @@ Inductive fdecl_has_type : fun_env -> datacon_info -> fdecl -> Prop :=
                  body out ->
         ~ In (l_out, r_out) N' ->
         fdecl_has_type FDs DI (FunDecl f locs named_args out regions body).
+
+(* The thesis uses the function-definition typing fact together with a
+   simultaneous location/value instantiation lemma in the D_App proof.
+   In the named mechanization we strengthen that meta-level obligation:
+   the instantiated body must remain typable even after Freshen(FD) is
+   asked to avoid additional caller support beyond the actual arguments.
+   This keeps the runtime-aware D_App rule honest instead of smuggling
+   its freshness side condition through an unspoken alpha-conversion
+   argument. *)
+Definition fdecl_instantiation_ok
+    (FDs : fun_env) (DI : datacon_info) (fd : fdecl) : Prop :=
+  match fd with
+  | FunDecl _ locs named_args out _ body =>
+      forall G Sigma C A N avoid_l avoid_r lrs vs tc l r,
+        In (l, r) N ->
+        In (r, AP_Loc (l, r)) A ->
+        List.length lrs = List.length locs ->
+        subst_locs_in_ty locs lrs out = LocTy tc l r ->
+        app_vals_have_type FDs DI G Sigma C A N locs lrs vs named_args ->
+        has_type FDs DI G Sigma C A N
+                 A (remove_nursery N (l, r))
+                 (instantiated_fun_body_with_support
+                    avoid_l avoid_r locs lrs named_args vs body)
+                 (LocTy tc l r)
+  end.
 
 (* ---- T-Program (thesis: \tprogram) ----
    ⊢_fun FD_i  (for each function declaration)
@@ -432,35 +672,61 @@ Proof.
     [ left; reflexivity        (* A(r) = (l,r) *)
     | left; reflexivity        (* (l,r) ∈ N *)
     | shelve                   (* (l_a,r) ∉ N'' — deferred *)
-    | intro H; congruence      (* (l,r) ≠ (l_a,r) *)
+    | intro H; congruence      (* (l_a,r) ≠ (l,r) *)
     | idtac ].
   (* Line 3: let x : T@l_a^r = Leaf(l_a^r) — T_Let *)
   eapply T_Let.
   - (* Leaf l_a^r [] — T_DataCon *)
-    eapply T_DataCon;
-      [ left; reflexivity      (* Leaf ∈ DI *)
+    eapply (T_DataCon _ _ _ _ _ _ _ _ _ _ _ _ (@nil tycon) (@nil field_layout_entry));
+      [ simpl; destruct (datacon_eq_dec Lf Lf); [reflexivity|congruence]
       | left; reflexivity      (* (l_a,r) ∈ N *)
-      | reflexivity ].         (* |[]| = |[]| *)
+      | reflexivity
+      | exact I
+      | left; reflexivity
+      | constructor ].         (* empty fields / values *)
   - (* Line 4: letloc l_b^r = after(T@l_a^r) — T_LLAfter *)
     eapply T_LLAfter;
       [ left; reflexivity      (* A(r) = (l_a,r) *)
       | left; reflexivity      (* Σ((l_a,r)) = T *)
       | cbn; intros [H|[]]; congruence (* (l_a,r) ∉ [(l,r)] *)
       | shelve                 (* (l_b,r) ∉ N'' — deferred *)
-      | intro H; congruence    (* (l,r) ≠ (l_b,r) *)
+      | intro H; congruence    (* (l_b,r) ≠ (l,r) *)
       | idtac ].
     (* Line 5: let y : T@l_b^r = Leaf(l_b^r) — T_Let *)
     eapply T_Let.
     + (* Leaf l_b^r [] — T_DataCon *)
-      eapply T_DataCon;
-        [ left; reflexivity    (* Leaf ∈ DI *)
+      eapply (T_DataCon _ _ _ _ _ _ _ _ _ _ _ _ (@nil tycon) (@nil field_layout_entry));
+        [ simpl; destruct (datacon_eq_dec Lf Lf); [reflexivity|congruence]
         | left; reflexivity    (* (l_b,r) ∈ N *)
-        | reflexivity ].       (* |[]| = |[]| *)
+        | reflexivity
+        | exact I
+        | left; reflexivity
+        | constructor ].       (* empty fields / values *)
     + (* Line 6: Node l^r [x, y] — T_DataCon *)
-      eapply T_DataCon;
-        [ right; left; reflexivity  (* Node ∈ DI *)
+      eapply (T_DataCon _ _ _ _ _ _ _ _ _ _ _ _ [T; T] [(la, T); (lb, T)]);
+        [ simpl;
+          destruct (datacon_eq_dec Nd Lf); [discriminate|];
+          destruct (datacon_eq_dec Nd Nd); [reflexivity|congruence]
         | cbn; left; reflexivity    (* (l,r) ∈ N *)
-        | reflexivity ].            (* |[x,y]| = |[T,T]| *)
+        | reflexivity
+        | split
+        | left; reflexivity
+        | ].
+      * right. left. reflexivity.
+      * split.
+        -- left. reflexivity.
+        -- exact I.
+      * constructor.
+        -- apply T_Var.
+           ++ simpl. destruct (term_var_eq_dec x x); [reflexivity | contradiction].
+           ++ simpl. right. left. reflexivity.
+        -- constructor.
+           ++ apply T_Var.
+              ** simpl. destruct (term_var_eq_dec y x).
+                 --- subst. discriminate.
+                 --- destruct (term_var_eq_dec y y); [reflexivity | contradiction].
+              ** simpl. left. reflexivity.
+           ++ constructor.
   (* Resolve deferred nursery-freshness goals:
      Both output nurseries are nil after all allocations. *)
   Unshelve.
