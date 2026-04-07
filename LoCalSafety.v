@@ -338,6 +338,14 @@ Definition store_extends (Sigma Sigma' : store_type) : Prop :=
 
 Definition conloc_extends (C C' : conloc_env) : Prop :=
   forall lr le, In (lr, le) C -> In (lr, le) C'.
+
+Lemma store_extends_refl :
+  forall Sigma,
+    store_extends Sigma Sigma.
+Proof.
+  unfold store_extends. auto.
+Qed.
+
 Lemma conloc_extends_refl :
   forall C,
     conloc_extends C C.
