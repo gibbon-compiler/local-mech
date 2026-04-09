@@ -306,6 +306,7 @@ Definition subst_locs_fresh
        e).
 
 Definition subst_app_fresh_with_support
+    (avoid_t : list term_var)
     (avoid_l : list laddr)
     (avoid_r : list region_var)
     (formals actuals : list (loc_var * region_var))
@@ -314,7 +315,7 @@ Definition subst_app_fresh_with_support
     (e : expr) : expr :=
   let e' :=
     freshen_expr_with
-      (vals_term_vars val_args)
+      (avoid_t ++ vals_term_vars val_args)
       (avoid_l ++ actuals ++ vals_symbolic_laddrs val_args)
       (avoid_r ++ loc_arg_regions actuals ++ vals_region_vars val_args)
       e in
@@ -326,7 +327,7 @@ Definition subst_app_fresh
     (params : list (term_var * ty))
     (val_args : list val)
     (e : expr) : expr :=
-  subst_app_fresh_with_support nil nil formals actuals params val_args e.
+  subst_app_fresh_with_support nil nil nil formals actuals params val_args e.
 
 Definition subst_app_runtime_fresh
     (M : loc_map)
@@ -337,8 +338,14 @@ Definition subst_app_runtime_fresh
   (* Dynamic-semantics refinement beyond the thesis prose:
      Freshen(FD) must avoid the caller's current symbolic runtime support,
      not only the actual arguments, or the named mechanization can
-     collide with live entries already present in M. *)
+     collide with live entries already present in M.
+
+     The shared freshening operator also supports an additional term-binder
+     avoid set.  The top-level step relation supplies nil here because it
+     has no explicit ambient syntax context, while the proof layer can ask
+     for more support when reasoning under surrounding binders. *)
   subst_app_fresh_with_support
+    nil
     (loc_map_laddrs M)
     (loc_map_regions M)
     formals actuals params val_args e.
@@ -443,7 +450,8 @@ Fixpoint extend_loc_fields (M : loc_map) (rc : region_var)
 (*     e   = expression                                              *)
 (* ================================================================= *)
 
-Inductive step :
+Inductive step_ctx :
+    list term_var -> list laddr -> list region_var ->
     list fdecl -> datacon_info ->
     store -> loc_map -> expr ->
     store -> loc_map -> expr -> Prop :=
@@ -451,24 +459,24 @@ Inductive step :
   (* ---- D-DataConstructor ----
      S; M; K l^r v₁...vₙ  ⇒  S'; M; ⟨r,i⟩^(l^r)
      where  ⟨r,i⟩ = M(l^r),   S' = S ∪ {r ↦ (i ↦ K)} *)
-  | D_DataCon : forall FDs DI S M K l r vs rc i,
+  | D_DataCon : forall avoid_t avoid_l avoid_r FDs DI S M K l r vs rc i,
       lookup_loc M (l, r) = Some (rc, i) ->
-      step FDs DI S M (e_datacon K l r vs)
+      step_ctx avoid_t avoid_l avoid_r FDs DI S M (e_datacon K l r vs)
            (store_write S rc i K) M (e_val (v_cloc rc i l r))
 
   (* ---- D-LetLoc-Start ----
      S; M; letloc l^r = start(r) in e  ⇒  S; M'; e
      where  M' = M ∪ {(l,r) ↦ ⟨r, 0⟩} *)
-  | D_LetLoc_Start : forall FDs DI S M l r body,
-      step FDs DI S M (e_letloc l r (LE_Start r) body)
+  | D_LetLoc_Start : forall avoid_t avoid_l avoid_r FDs DI S M l r body,
+      step_ctx avoid_t avoid_l avoid_r FDs DI S M (e_letloc l r (LE_Start r) body)
            S (extend_loc M (l, r) (r, 0)) body
 
   (* ---- D-LetLoc-Tag ----
      S; M; letloc l^r = l'^r + 1 in e  ⇒  S; M'; e
      where  ⟨r,i⟩ = M(l'^r),   M' = M ∪ {(l,r) ↦ ⟨r, i+1⟩} *)
-  | D_LetLoc_Tag : forall FDs DI S M l r l' body rc i,
+  | D_LetLoc_Tag : forall avoid_t avoid_l avoid_r FDs DI S M l r l' body rc i,
       lookup_loc M (l', r) = Some (rc, i) ->
-      step FDs DI S M (e_letloc l r (LE_Next l' r) body)
+      step_ctx avoid_t avoid_l avoid_r FDs DI S M (e_letloc l r (LE_Next l' r) body)
            S (extend_loc M (l, r) (rc, i + 1)) body
 
   (* ---- D-LetLoc-After ----
@@ -476,34 +484,37 @@ Inductive step :
      where  ⟨r,i⟩ = M(l₁^r),
             ewitness(T, ⟨r,i⟩, S, ⟨r,j⟩),
             M' = M ∪ {(l,r) ↦ ⟨r, j⟩} *)
-  | D_LetLoc_After : forall FDs DI S M l r T l1 body rc i j,
+  | D_LetLoc_After : forall avoid_t avoid_l avoid_r FDs DI S M l r T l1 body rc i j,
       lookup_loc M (l1, r) = Some (rc, i) ->
       end_witness DI S (rc, i) T (rc, j) ->
-      step FDs DI S M (e_letloc l r (LE_After T l1 r) body)
+      step_ctx avoid_t avoid_l avoid_r FDs DI S M (e_letloc l r (LE_After T l1 r) body)
            S (extend_loc M (l, r) (rc, j)) body
 
   (* ---- D-Let-Expr ----
      S; M; e₁ ⇒ S'; M'; e₁'     e₁ ≠ v
      ─────────────────────────────────────────
      S; M; let x:τ = e₁ in e₂  ⇒  S'; M'; let x:τ = e₁' in e₂ *)
-  | D_Let_Expr : forall FDs DI S M S' M' x T e1 e1' e2,
+  | D_Let_Expr : forall avoid_t avoid_l avoid_r FDs DI S M S' M' x T e1 e1' e2,
       is_val e1 = false ->
-      step FDs DI S M e1 S' M' e1' ->
-      step FDs DI S M (e_let x T e1 e2)
+      step_ctx (expr_bound_term_vars e2 ++ avoid_t)
+               (expr_bound_laddrs e2 ++ avoid_l)
+               (expr_bound_regions e2 ++ avoid_r)
+               FDs DI S M e1 S' M' e1' ->
+      step_ctx avoid_t avoid_l avoid_r FDs DI S M (e_let x T e1 e2)
            S' M' (e_let x T e1' e2)
 
   (* ---- D-Let-Val ----
      S; M; let x:τ = v in e₂  ⇒  S; M; [v/x]e₂
      The thesis uses Freshen(FD) for function applications; the let
      rule itself is ordinary substitution. *)
-  | D_Let_Val : forall FDs DI S M x T vl e2,
-      step FDs DI S M (e_let x T (e_val vl) e2)
+  | D_Let_Val : forall avoid_t avoid_l avoid_r FDs DI S M x T vl e2,
+      step_ctx avoid_t avoid_l avoid_r FDs DI S M (e_let x T (e_val vl) e2)
            S M (subst_val x vl e2)
 
   (* ---- D-LetRegion ----
      S; M; letregion r in e  ⇒  S; M; e *)
-  | D_LetRegion : forall FDs DI S M r body,
-      step FDs DI S M (e_letregion r body)
+  | D_LetRegion : forall avoid_t avoid_l avoid_r FDs DI S M r body,
+      step_ctx avoid_t avoid_l avoid_r FDs DI S M (e_letregion r body)
            S M body
 
   (* ---- D-App ----
@@ -517,12 +528,16 @@ Inductive step :
      from M as well as the actual arguments.  This makes explicit the
      Barendregt-style freshness side condition that is only implicit in
      the thesis text. *)
-  | D_App : forall FDs DI S M f loc_args val_args
+  | D_App : forall avoid_t avoid_l avoid_r FDs DI S M f loc_args val_args
                    f_locs f_named_params f_retty f_regions f_body,
       lookup_fdecl FDs f =
         Some (FunDecl f f_locs f_named_params f_retty f_regions f_body) ->
-      step FDs DI S M (e_app f loc_args val_args)
-           S M (subst_app_runtime_fresh M f_locs loc_args f_named_params val_args f_body)
+      step_ctx avoid_t avoid_l avoid_r FDs DI S M (e_app f loc_args val_args)
+           S M (subst_app_fresh_with_support
+                  avoid_t
+                  (loc_map_laddrs M ++ avoid_l)
+                  (loc_map_regions M ++ avoid_r)
+                  f_locs loc_args f_named_params val_args f_body)
 
   (* ---- D-Case ----
      S; M; case ⟨r,i⟩^(l^r) of [..., K (x₁:τ₁@l₁^r,...) → e, ...]
@@ -530,7 +545,7 @@ Inductive step :
      where  K = S(r)(i),
             field start addresses computed via end-witness chains,
             M' extends M with field location bindings *)
-  | D_Case : forall FDs DI S M rc i l r pats
+  | D_Case : forall avoid_t avoid_l avoid_r FDs DI S M rc i l r pats
                     K binds body tyc fieldtys indices,
       (* Look up constructor tag at scrutinee address *)
       heap_lookup S rc i = Some K ->
@@ -543,11 +558,17 @@ Inductive step :
       (* Compute field start addresses via end-witness chain *)
       field_starts DI S rc (i + 1) fieldtys indices ->
       (* Step: extend loc map, substitute concrete locs for pattern vars *)
-      step FDs DI S M (e_case (v_cloc rc i l r) pats)
+      step_ctx avoid_t avoid_l avoid_r FDs DI S M (e_case (v_cloc rc i l r) pats)
            S (extend_loc_fields M rc binds indices)
              (subst_vals (pat_term_vars binds)
                          (build_cloc_vals rc binds indices)
                          body).
+
+Definition step
+    (FDs : list fdecl) (DI : datacon_info)
+    (S : store) (M : loc_map) (e : expr)
+    (S' : store) (M' : loc_map) (e' : expr) : Prop :=
+  step_ctx nil nil nil FDs DI S M e S' M' e'.
 
 (* ================================================================= *)
 (* Multi-step relation (reflexive-transitive closure of step)        *)

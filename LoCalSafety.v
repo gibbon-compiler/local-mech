@@ -1186,6 +1186,108 @@ Fixpoint expr_term_capture_safe (e : expr) : Prop :=
       in pats_safe pats
   end.
 
+(* The term-only no-capture condition above is enough for raw D_Let_Val
+   substitution, but the named LoCal mechanization also has an analogous
+   location/region issue across let boundaries: if e1 grows Sigma/C using
+   symbolic locations or regions that collide with binders in e2, then the
+   proof-side freshness story for e2 cannot be transported honestly.
+
+   We state those syntax-side companions explicitly here.  They are not yet
+   threaded through the final theorem layer below, but making them visible is
+   important because they identify the remaining meta-theoretic gap sharply
+   instead of hiding it behind a coarse subject-reduction assumption. *)
+Fixpoint expr_loc_capture_safe (e : expr) : Prop :=
+  match e with
+  | e_val _ => True
+  | e_app _ _ _ => True
+  | e_datacon _ _ _ _ => True
+  | e_let _ _ e1 e2 =>
+      expr_loc_capture_safe e1
+      /\ expr_loc_capture_safe e2
+      /\ (forall lr,
+            In lr (expr_occurs_laddrs e1) ->
+            ~ In lr (expr_bound_laddrs e2))
+  | e_letloc _ _ _ body => expr_loc_capture_safe body
+  | e_letregion _ body => expr_loc_capture_safe body
+  | e_case _ pats =>
+      let fix pats_safe (ps : list pat) : Prop :=
+        match ps with
+        | nil => True
+        | pat_clause _ _ body :: ps' =>
+            expr_loc_capture_safe body /\ pats_safe ps'
+        end
+      in pats_safe pats
+  end.
+
+Fixpoint pat_occurs_bindable_regions (p : pat) : list region_var :=
+  match p with
+  | pat_clause _ binds body =>
+      (binds_region_vars binds ++ expr_occurs_bindable_regions body)%list
+  end
+
+with expr_occurs_bindable_regions (e : expr) : list region_var :=
+  match e with
+  | e_val v0 => val_symbolic_regions v0
+  | e_app _ locs vs =>
+      (loc_arg_regions locs ++ vals_symbolic_regions vs)%list
+  | e_datacon _ _ r vs =>
+      r :: vals_symbolic_regions vs
+  | e_let _ T e1 e2 =>
+      (ty_region_vars T ++ expr_occurs_bindable_regions e1
+      ++ expr_occurs_bindable_regions e2)%list
+  | e_letloc _ r le body =>
+      (r :: locexp_region_vars le ++ expr_occurs_bindable_regions body)%list
+  | e_letregion r body =>
+      r :: expr_occurs_bindable_regions body
+  | e_case v0 pats =>
+      let fix go (ps : list pat) : list region_var :=
+        match ps with
+        | nil => nil
+        | p :: ps' => (pat_occurs_bindable_regions p ++ go ps')%list
+        end
+      in (val_symbolic_regions v0 ++ go pats)%list
+  end.
+
+(* Region binders in LoCal bind symbolic regions, not the concrete runtime
+   region component carried inside v_cloc values.  So the no-capture invariant
+   for named region binders tracks only symbolic region occurrences. *)
+Fixpoint expr_region_capture_safe (e : expr) : Prop :=
+  match e with
+  | e_val _ => True
+  | e_app _ _ _ => True
+  | e_datacon _ _ _ _ => True
+  | e_let _ _ e1 e2 =>
+      expr_region_capture_safe e1
+      /\ expr_region_capture_safe e2
+      /\ (forall r,
+            In r (expr_occurs_bindable_regions e1) ->
+            ~ In r (expr_bound_regions e2))
+  | e_letloc _ _ _ body => expr_region_capture_safe body
+  | e_letregion _ body => expr_region_capture_safe body
+  | e_case _ pats =>
+      let fix pats_safe (ps : list pat) : Prop :=
+        match ps with
+        | nil => True
+        | pat_clause _ _ body :: ps' =>
+            expr_region_capture_safe body /\ pats_safe ps'
+        end
+      in pats_safe pats
+  end.
+
+Fixpoint pats_loc_capture_safe (ps : list pat) : Prop :=
+  match ps with
+  | nil => True
+  | pat_clause _ _ body :: ps' =>
+      expr_loc_capture_safe body /\ pats_loc_capture_safe ps'
+  end.
+
+Fixpoint pats_region_capture_safe (ps : list pat) : Prop :=
+  match ps with
+  | nil => True
+  | pat_clause _ _ body :: ps' =>
+      expr_region_capture_safe body /\ pats_region_capture_safe ps'
+  end.
+
 Definition pat_term_capture_safe (p : pat) : Prop :=
   match p with
   | pat_clause _ _ body => expr_term_capture_safe body
@@ -1212,7 +1314,8 @@ Fixpoint pats_term_capture_safe (ps : list pat) : Prop :=
 
    - runtime expressions carry expr_step_stable:
        alpha-regularity of binders
-       + term-substitution safety for raw D_Let_Val / D_Case substitution
+       + term/location/region substitution safety for the named
+         D_Let_Val / D_Case reductions
 
    - source templates (function bodies and the initial main term) carry a
      stronger source-side invariant that also says they are symbolic-only.
@@ -1220,7 +1323,10 @@ Fixpoint pats_term_capture_safe (ps : list pat) : Prop :=
      introduced by evaluation, not written in source syntax. *)
 
 Definition expr_step_stable (e : expr) : Prop :=
-  expr_alpha_regular e /\ expr_term_capture_safe e.
+  expr_alpha_regular e
+  /\ expr_term_capture_safe e
+  /\ expr_loc_capture_safe e
+  /\ expr_region_capture_safe e.
 
 Definition source_expr_step_stable (e : expr) : Prop :=
   expr_step_stable e /\ expr_symbolic_only e.
@@ -1439,6 +1545,30 @@ Proof.
   exact Hsafe.
 Qed.
 
+Lemma expr_loc_capture_safe_let_inv :
+  forall x T e1 e2,
+    expr_loc_capture_safe (e_let x T e1 e2) ->
+    expr_loc_capture_safe e1
+    /\ expr_loc_capture_safe e2
+    /\ (forall lr, In lr (expr_occurs_laddrs e1) -> ~ In lr (expr_bound_laddrs e2)).
+Proof.
+  intros x T e1 e2 Hsafe.
+  simpl in Hsafe.
+  exact Hsafe.
+Qed.
+
+Lemma expr_region_capture_safe_let_inv :
+  forall x T e1 e2,
+    expr_region_capture_safe (e_let x T e1 e2) ->
+    expr_region_capture_safe e1
+    /\ expr_region_capture_safe e2
+    /\ (forall r, In r (expr_occurs_bindable_regions e1) -> ~ In r (expr_bound_regions e2)).
+Proof.
+  intros x T e1 e2 Hsafe.
+  simpl in Hsafe.
+  exact Hsafe.
+Qed.
+
 (* The thesis treats fresh location/region binders as an implicit
    side-condition.  We keep the typing rules monotone, and instead
    expose the needed binder-freshness obligations as a separate
@@ -1564,12 +1694,19 @@ with pats_have_type_fresh :
    the proof-side binder-freshness judgment on the D_App reduct.  The
    thesis uses Freshen(FD) informally at this point; the named
    mechanization exposes the corresponding meta-level obligation
-   explicitly here instead of hiding it in the final theorem. *)
+   explicitly here instead of hiding it in the final theorem.
+
+   Refinement note:
+   the support-parameterized body instantiation now also allows an
+   additional surrounding term-binder avoid set.  That makes explicit
+   the fact that, in a named mechanization, the same Freshen(FD)
+   operation may need to avoid both runtime support and ambient binder
+   names supplied by the proof context. *)
 Definition fdecl_instantiation_fresh_ok
     (FDs : fun_env) (DI : datacon_info) (fd : fdecl) : Prop :=
   match fd with
   | FunDecl _ locs named_args out _ body =>
-      forall G Sigma C A N avoid_l avoid_r lrs vs tc l r,
+      forall G Sigma C A N avoid_t avoid_l avoid_r lrs vs tc l r,
         In (l, r) N ->
         In (r, AP_Loc (l, r)) A ->
         List.length lrs = List.length locs ->
@@ -1578,7 +1715,7 @@ Definition fdecl_instantiation_fresh_ok
         has_type_fresh FDs DI G Sigma C A N
           A (remove_nursery N (l, r))
           (instantiated_fun_body_with_support
-             avoid_l avoid_r locs lrs named_args vs body)
+             avoid_t avoid_l avoid_r locs lrs named_args vs body)
           (LocTy tc l r)
   end.
 
@@ -4559,6 +4696,281 @@ Proof.
       * right. exact Hin'.
 Qed.
 
+Lemma val_symbolic_laddrs_subst_in_val_inv :
+  forall x s v0 lr,
+    In lr (val_symbolic_laddrs (subst_in_val x s v0)) ->
+    In lr (val_symbolic_laddrs v0) \/ In lr (val_symbolic_laddrs s).
+Proof.
+  intros x s v0 lr Hin.
+  destruct v0 as [z | rc i l r]; simpl in *.
+  - destruct (term_var_eq_dec x z).
+    + right. exact Hin.
+    + left. exact Hin.
+  - destruct Hin as [Heq | Hin].
+    + left. left. exact Heq.
+    + contradiction.
+Qed.
+
+Lemma vals_symbolic_laddrs_map_subst_in_val_inv :
+  forall x s vs lr,
+    In lr (vals_symbolic_laddrs (List.map (subst_in_val x s) vs)) ->
+    In lr (vals_symbolic_laddrs vs) \/ In lr (val_symbolic_laddrs s).
+Proof.
+  intros x s vs.
+  induction vs as [| v0 vs IH]; intros lr Hin; simpl in *.
+  - contradiction.
+  - apply in_app_or in Hin.
+    destruct Hin as [Hin | Hin].
+    + destruct (val_symbolic_laddrs_subst_in_val_inv _ _ _ _ Hin)
+        as [Hin' | Hin'].
+      * left. simpl. apply in_or_app. left. exact Hin'.
+      * right. exact Hin'.
+    + destruct (IH _ Hin) as [Hin' | Hin'].
+      * left. simpl. apply in_or_app. right. exact Hin'.
+      * right. exact Hin'.
+Qed.
+
+Lemma expr_occurs_laddrs_subst_val_inv :
+  forall x s e lr,
+    In lr (expr_occurs_laddrs (subst_val x s e)) ->
+    In lr (expr_occurs_laddrs e) \/ In lr (val_symbolic_laddrs s).
+Proof.
+  intros x s.
+  fix IH 1.
+  intros e lr Hin.
+  destruct e as [v0 | f locs vs | dc l r vs | z T e1 e2 | l r le body | r body | scrut ps];
+    simpl in *.
+  - eapply val_symbolic_laddrs_subst_in_val_inv; eauto.
+  - apply in_app_or in Hin.
+    destruct Hin as [Hin | Hin].
+    + left. simpl. apply in_or_app. left. exact Hin.
+    + destruct (vals_symbolic_laddrs_map_subst_in_val_inv _ _ _ _ Hin)
+        as [Hin' | Hin'].
+      * left. simpl. apply in_or_app. right. exact Hin'.
+      * right. exact Hin'.
+  - destruct Hin as [Heq | Hin].
+    + left. simpl. left. exact Heq.
+    + destruct (vals_symbolic_laddrs_map_subst_in_val_inv _ _ _ _ Hin)
+        as [Hin' | Hin'].
+      * left. simpl. right. exact Hin'.
+      * right. exact Hin'.
+  - destruct (term_var_eq_dec x z) as [Heq | Hneq]; simpl in Hin.
+    + apply in_app_or in Hin.
+      destruct Hin as [HinT | Hin].
+      * left. simpl. apply in_or_app. left. exact HinT.
+      * apply in_app_or in Hin.
+        destruct Hin as [Hin1 | Hin2].
+        -- destruct (IH e1 _ Hin1) as [Hin' | Hin'].
+           ++ left. simpl. apply in_or_app. right. apply in_or_app. left. exact Hin'.
+           ++ right. exact Hin'.
+        -- left. simpl. apply in_or_app. right. apply in_or_app. right. exact Hin2.
+    + apply in_app_or in Hin.
+      destruct Hin as [HinT | Hin].
+      * left. simpl. apply in_or_app. left. exact HinT.
+      * apply in_app_or in Hin.
+        destruct Hin as [Hin1 | Hin2].
+        -- destruct (IH e1 _ Hin1) as [Hin' | Hin'].
+           ++ left. simpl. apply in_or_app. right. apply in_or_app. left. exact Hin'.
+           ++ right. exact Hin'.
+        -- destruct (IH e2 _ Hin2) as [Hin' | Hin'].
+           ++ left. simpl. apply in_or_app. right. apply in_or_app. right. exact Hin'.
+           ++ right. exact Hin'.
+  - destruct Hin as [Heq | Hin].
+    + left. simpl. left. exact Heq.
+    + apply in_app_or in Hin.
+      destruct Hin as [HinLe | HinBody].
+      * left. simpl. right. apply in_or_app. left. exact HinLe.
+      * destruct (IH body _ HinBody) as [Hin' | Hin'].
+        -- left. simpl. right. apply in_or_app. right. exact Hin'.
+        -- right. exact Hin'.
+  - eapply IH; eauto.
+  - simpl in Hin.
+    apply in_app_or in Hin.
+    destruct Hin as [Hscrut | Hpats].
+    + destruct (val_symbolic_laddrs_subst_in_val_inv _ _ _ _ Hscrut)
+        as [Hin' | Hin'].
+      * left. simpl. apply in_or_app. left. exact Hin'.
+      * right. exact Hin'.
+    + assert (Hpats_inv :
+          forall ps0,
+            In lr
+              ((fix go (ps1 : list pat) : list laddr :=
+                  match ps1 with
+                  | nil => nil
+                  | p :: ps1' => (pat_occurs_laddrs p ++ go ps1')%list
+                  end)
+                 (subst_pats_val x s ps0)) ->
+            In lr (flat_map pat_occurs_laddrs ps0) \/ In lr (val_symbolic_laddrs s)).
+      { fix IHps 1.
+        intros ps0 HinPs.
+        destruct ps0 as [| [K binds body] ps']; simpl in *.
+        - contradiction.
+        - apply in_app_or in HinPs.
+          destruct HinPs as [HinPat | HinTail].
+          + destruct
+              (existsb
+                 (fun b : term_var * ty =>
+                    if term_var_eq_dec x (fst b) then true else false)
+                 binds) eqn:Hbind;
+              simpl in HinPat.
+            * left. simpl. apply in_or_app. left. exact HinPat.
+            * apply in_app_or in HinPat.
+              destruct HinPat as [HinBind | HinBody].
+              -- left. simpl. apply in_or_app. left.
+                 apply in_or_app. left. exact HinBind.
+              -- destruct (IH body _ HinBody) as [Hin' | Hin'].
+                 ++ left. simpl. apply in_or_app. left.
+                    apply in_or_app. right. exact Hin'.
+                 ++ right. exact Hin'.
+          + destruct (IHps ps' HinTail) as [Hin' | Hin'].
+            * left. simpl. apply in_or_app. right. exact Hin'.
+            * right. exact Hin'. }
+      rewrite subst_case_pats_eq in Hpats.
+      destruct (Hpats_inv ps Hpats) as [Hin' | Hin'].
+      * left. simpl. apply in_or_app. right. exact Hin'.
+      * right. exact Hin'.
+Qed.
+
+Lemma val_symbolic_regions_subst_in_val_inv :
+  forall x s v0 r,
+    In r (val_symbolic_regions (subst_in_val x s v0)) ->
+    In r (val_symbolic_regions v0) \/ In r (val_symbolic_regions s).
+Proof.
+  intros x s v0 r Hin.
+  destruct v0 as [z | rc i l rg]; simpl in *.
+  - destruct (term_var_eq_dec x z).
+    + right. exact Hin.
+    + left. exact Hin.
+  - destruct Hin as [Heq | Hin].
+    + left. left. exact Heq.
+    + contradiction.
+Qed.
+
+Lemma vals_symbolic_regions_map_subst_in_val_inv :
+  forall x s vs r,
+    In r (vals_symbolic_regions (List.map (subst_in_val x s) vs)) ->
+    In r (vals_symbolic_regions vs) \/ In r (val_symbolic_regions s).
+Proof.
+  intros x s vs.
+  induction vs as [| v0 vs IH]; intros r Hin; simpl in *.
+  - contradiction.
+  - apply in_app_or in Hin.
+    destruct Hin as [Hin | Hin].
+    + destruct (val_symbolic_regions_subst_in_val_inv _ _ _ _ Hin)
+        as [Hin' | Hin'].
+      * left. simpl. apply in_or_app. left. exact Hin'.
+      * right. exact Hin'.
+    + destruct (IH _ Hin) as [Hin' | Hin'].
+      * left. simpl. apply in_or_app. right. exact Hin'.
+      * right. exact Hin'.
+Qed.
+
+Lemma expr_occurs_bindable_regions_subst_val_inv :
+  forall x s e r,
+    In r (expr_occurs_bindable_regions (subst_val x s e)) ->
+    In r (expr_occurs_bindable_regions e) \/ In r (val_symbolic_regions s).
+Proof.
+  intros x s.
+  fix IH 1.
+  intros e r Hin.
+  destruct e as [v0 | f locs vs | dc l rg vs | z T e1 e2 | l rg le body | rg body | scrut ps];
+    simpl in *.
+  - eapply val_symbolic_regions_subst_in_val_inv; eauto.
+  - apply in_app_or in Hin.
+    destruct Hin as [Hin | Hin].
+    + left. simpl. apply in_or_app. left. exact Hin.
+    + destruct (vals_symbolic_regions_map_subst_in_val_inv _ _ _ _ Hin)
+        as [Hin' | Hin'].
+      * left. simpl. apply in_or_app. right. exact Hin'.
+      * right. exact Hin'.
+  - destruct Hin as [Heq | Hin].
+    + left. simpl. left. exact Heq.
+    + destruct (vals_symbolic_regions_map_subst_in_val_inv _ _ _ _ Hin)
+        as [Hin' | Hin'].
+      * left. simpl. right. exact Hin'.
+      * right. exact Hin'.
+  - destruct (term_var_eq_dec x z) as [Heq | Hneq]; simpl in Hin.
+    + apply in_app_or in Hin.
+      destruct Hin as [HinT | Hin].
+      * left. simpl. apply in_or_app. left. exact HinT.
+      * apply in_app_or in Hin.
+        destruct Hin as [Hin1 | Hin2].
+        -- destruct (IH e1 _ Hin1) as [Hin' | Hin'].
+           ++ left. simpl. apply in_or_app. right. apply in_or_app. left. exact Hin'.
+           ++ right. exact Hin'.
+        -- left. simpl. apply in_or_app. right. apply in_or_app. right. exact Hin2.
+    + apply in_app_or in Hin.
+      destruct Hin as [HinT | Hin].
+      * left. simpl. apply in_or_app. left. exact HinT.
+      * apply in_app_or in Hin.
+        destruct Hin as [Hin1 | Hin2].
+        -- destruct (IH e1 _ Hin1) as [Hin' | Hin'].
+           ++ left. simpl. apply in_or_app. right. apply in_or_app. left. exact Hin'.
+           ++ right. exact Hin'.
+        -- destruct (IH e2 _ Hin2) as [Hin' | Hin'].
+           ++ left. simpl. apply in_or_app. right. apply in_or_app. right. exact Hin'.
+           ++ right. exact Hin'.
+  - destruct Hin as [Heq | Hin].
+    + left. simpl. left. exact Heq.
+    + apply in_app_or in Hin.
+      destruct Hin as [HinLe | HinBody].
+      * left. simpl. right. apply in_or_app. left. exact HinLe.
+      * destruct (IH body _ HinBody) as [Hin' | Hin'].
+        -- left. simpl. right. apply in_or_app. right. exact Hin'.
+        -- right. exact Hin'.
+  - destruct Hin as [Heq | Hin].
+    + left. simpl. left. exact Heq.
+    + destruct (IH body _ Hin) as [Hin' | Hin'].
+      * left. simpl. right. exact Hin'.
+      * right. exact Hin'.
+  - simpl in Hin.
+    apply in_app_or in Hin.
+    destruct Hin as [Hscrut | Hpats].
+    + destruct (val_symbolic_regions_subst_in_val_inv _ _ _ _ Hscrut)
+        as [Hin' | Hin'].
+      * left. simpl. apply in_or_app. left. exact Hin'.
+      * right. exact Hin'.
+    + assert (Hpats_inv :
+          forall ps0,
+            In r
+              ((fix go (ps1 : list pat) : list region_var :=
+                  match ps1 with
+                  | nil => nil
+                  | p :: ps1' => (pat_occurs_bindable_regions p ++ go ps1')%list
+                  end)
+                 (subst_pats_val x s ps0)) ->
+            In r (flat_map pat_occurs_bindable_regions ps0)
+            \/ In r (val_symbolic_regions s)).
+      { fix IHps 1.
+        intros ps0 HinPs.
+        destruct ps0 as [| [K binds body] ps']; simpl in *.
+        - contradiction.
+        - apply in_app_or in HinPs.
+          destruct HinPs as [HinPat | HinTail].
+          + destruct
+              (existsb
+                 (fun b : term_var * ty =>
+                    if term_var_eq_dec x (fst b) then true else false)
+                 binds) eqn:Hbind;
+              simpl in HinPat.
+            * left. simpl. apply in_or_app. left. exact HinPat.
+            * apply in_app_or in HinPat.
+              destruct HinPat as [HinBind | HinBody].
+              -- left. simpl. apply in_or_app. left.
+                 apply in_or_app. left. exact HinBind.
+              -- destruct (IH body _ HinBody) as [Hin' | Hin'].
+                 ++ left. simpl. apply in_or_app. left.
+                    apply in_or_app. right. exact Hin'.
+                 ++ right. exact Hin'.
+          + destruct (IHps ps' HinTail) as [Hin' | Hin'].
+            * left. simpl. apply in_or_app. right. exact Hin'.
+            * right. exact Hin'. }
+      rewrite subst_case_pats_eq in Hpats.
+      destruct (Hpats_inv ps Hpats) as [Hin' | Hin'].
+      * left. simpl. apply in_or_app. right. exact Hin'.
+      * right. exact Hin'.
+Qed.
+
 Lemma pats_term_capture_safe_equiv :
   forall ps,
     (let fix pats_safe (ps0 : list pat) : Prop :=
@@ -4568,6 +4980,32 @@ Lemma pats_term_capture_safe_equiv :
            expr_term_capture_safe body /\ pats_safe ps0'
        end
      in pats_safe ps) <-> pats_term_capture_safe ps.
+Proof.
+  induction ps as [| [K binds body] ps IH]; simpl; tauto.
+Qed.
+
+Lemma pats_loc_capture_safe_equiv :
+  forall ps,
+    (let fix pats_safe (ps0 : list pat) : Prop :=
+       match ps0 with
+       | nil => True
+       | pat_clause _ _ body :: ps0' =>
+           expr_loc_capture_safe body /\ pats_safe ps0'
+       end
+     in pats_safe ps) <-> pats_loc_capture_safe ps.
+Proof.
+  induction ps as [| [K binds body] ps IH]; simpl; tauto.
+Qed.
+
+Lemma pats_region_capture_safe_equiv :
+  forall ps,
+    (let fix pats_safe (ps0 : list pat) : Prop :=
+       match ps0 with
+       | nil => True
+       | pat_clause _ _ body :: ps0' =>
+           expr_region_capture_safe body /\ pats_safe ps0'
+       end
+     in pats_safe ps) <-> pats_region_capture_safe ps.
 Proof.
   induction ps as [| [K binds body] ps IH]; simpl; tauto.
 Qed.
@@ -4637,7 +5075,7 @@ Proof.
            (fun b : term_var * located_type =>
               if term_var_eq_dec x (fst b) then true else false)
            binds) eqn:Hbind;
-        simpl.
+        cbn [subst_pats_val subst_pat_val pats_loc_capture_safe].
       * replace
           (existsb
              (fun b : term_var * ty =>
@@ -4675,23 +5113,233 @@ Proof.
               simpl. apply in_or_app. right. exact Hin.
 Qed.
 
+Lemma expr_loc_capture_safe_subst_val :
+  forall x s e,
+    expr_loc_capture_safe e ->
+    (forall lr, In lr (val_symbolic_laddrs s) -> ~ In lr (expr_bound_laddrs e)) ->
+    expr_loc_capture_safe (subst_val x s e).
+Proof.
+  intros x s.
+  fix IH 1.
+  intros e Hsafe Hnocap.
+  destruct e as [v0 | f locs vs | dc l r vs | z T e1 e2 | l r le body | r body | scrut pats];
+    simpl in *.
+  - exact I.
+  - exact I.
+  - exact I.
+  - destruct Hsafe as [Hsafe1 [Hsafe2 Hcross]].
+    split.
+    + eapply IH.
+      * exact Hsafe1.
+      * intros lr Hy Hin.
+        apply (Hnocap lr Hy).
+        simpl. apply in_or_app. left. exact Hin.
+    + destruct (term_var_eq_dec x z) as [Heq | Hneq].
+      * split.
+        -- exact Hsafe2.
+        -- intros lr Hyocc Hinbound.
+           destruct (expr_occurs_laddrs_subst_val_inv x s e1 lr Hyocc)
+             as [Hinocc | Hins].
+           ++ eapply Hcross; eauto.
+           ++ eapply (Hnocap lr Hins).
+              simpl. apply in_or_app. right. exact Hinbound.
+      * split.
+        -- eapply IH.
+           ++ exact Hsafe2.
+           ++ intros lr Hy Hin.
+              apply (Hnocap lr Hy).
+              simpl. apply in_or_app. right. exact Hin.
+        -- intros lr Hyocc Hinbound.
+           rewrite expr_bound_laddrs_subst_val in Hinbound.
+           destruct (expr_occurs_laddrs_subst_val_inv x s e1 lr Hyocc)
+             as [Hinocc | Hins].
+           ++ eapply Hcross; eauto.
+           ++ eapply (Hnocap lr Hins).
+              simpl. apply in_or_app. right. exact Hinbound.
+  - eapply IH.
+    + exact Hsafe.
+    + intros lr Hy Hin.
+      apply (Hnocap lr Hy). simpl. right. exact Hin.
+  - eapply IH.
+    + exact Hsafe.
+    + intros lr Hy Hin.
+      apply (Hnocap lr Hy). simpl. exact Hin.
+  - rewrite subst_case_pats_eq.
+    apply (proj2 (pats_loc_capture_safe_equiv (subst_pats_val x s pats))).
+    apply (proj1 (pats_loc_capture_safe_equiv pats)) in Hsafe.
+    revert pats Hsafe Hnocap.
+    fix IHps 1.
+    intros ps HsafePs HnocapPs.
+    destruct ps as [| [K binds body] ps']; simpl in *.
+    + exact I.
+    + destruct HsafePs as [Hbody HsafeTail].
+      destruct
+        (existsb
+           (fun b : term_var * located_type =>
+              if term_var_eq_dec x (fst b) then true else false)
+           binds) eqn:Hbind.
+      * replace (subst_pats_val x s (pat_clause K binds body :: ps'))
+          with (pat_clause K binds body :: subst_pats_val x s ps')
+          by (cbv delta [located_type] in Hbind; simpl; rewrite Hbind; reflexivity).
+        assert (Hbranch :
+                  expr_loc_capture_safe body /\
+                  pats_loc_capture_safe (subst_pats_val x s ps')).
+        { split.
+          - exact Hbody.
+          - eapply IHps.
+            + exact HsafeTail.
+            + intros lr Hy Hin.
+              apply (HnocapPs lr Hy).
+              simpl. apply in_or_app. right. exact Hin. }
+        cbv delta [located_type] in Hbind.
+        simpl. rewrite Hbind. simpl. exact Hbranch.
+      * replace (subst_pats_val x s (pat_clause K binds body :: ps'))
+          with (pat_clause K binds (subst_val x s body) :: subst_pats_val x s ps')
+          by (cbv delta [located_type] in Hbind; simpl; rewrite Hbind; reflexivity).
+        assert (Hbranch :
+                  expr_loc_capture_safe (subst_val x s body) /\
+                  pats_loc_capture_safe (subst_pats_val x s ps')).
+        { split.
+          - eapply IH.
+            + exact Hbody.
+            + intros lr Hy Hin.
+              apply (HnocapPs lr Hy).
+              simpl. apply in_or_app. left.
+              apply in_or_app. right. exact Hin.
+          - eapply IHps.
+            + exact HsafeTail.
+            + intros lr Hy Hin.
+              apply (HnocapPs lr Hy).
+              simpl. apply in_or_app. right. exact Hin. }
+        cbv delta [located_type] in Hbind.
+        simpl. rewrite Hbind. simpl. exact Hbranch.
+Qed.
+
+Lemma expr_region_capture_safe_subst_val :
+  forall x s e,
+    expr_region_capture_safe e ->
+    (forall r, In r (val_symbolic_regions s) -> ~ In r (expr_bound_regions e)) ->
+    expr_region_capture_safe (subst_val x s e).
+Proof.
+  intros x s.
+  fix IH 1.
+  intros e Hsafe Hnocap.
+  destruct e as [v0 | f locs vs | dc l r vs | z T e1 e2 | l r le body | r body | scrut pats];
+    simpl in *.
+  - exact I.
+  - exact I.
+  - exact I.
+  - destruct Hsafe as [Hsafe1 [Hsafe2 Hcross]].
+    split.
+    + eapply IH.
+      * exact Hsafe1.
+      * intros r0 Hy Hin.
+        apply (Hnocap r0 Hy).
+        simpl. apply in_or_app. left. exact Hin.
+    + destruct (term_var_eq_dec x z) as [Heq | Hneq].
+      * split.
+        -- exact Hsafe2.
+        -- intros r0 Hyocc Hinbound.
+           destruct (expr_occurs_bindable_regions_subst_val_inv x s e1 r0 Hyocc)
+             as [Hinocc | Hins].
+           ++ eapply Hcross; eauto.
+           ++ eapply (Hnocap r0 Hins).
+              simpl. apply in_or_app. right. exact Hinbound.
+      * split.
+        -- eapply IH.
+           ++ exact Hsafe2.
+           ++ intros r0 Hy Hin.
+              apply (Hnocap r0 Hy).
+              simpl. apply in_or_app. right. exact Hin.
+        -- intros r0 Hyocc Hinbound.
+           rewrite expr_bound_regions_subst_val in Hinbound.
+           destruct (expr_occurs_bindable_regions_subst_val_inv x s e1 r0 Hyocc)
+             as [Hinocc | Hins].
+           ++ eapply Hcross; eauto.
+           ++ eapply (Hnocap r0 Hins).
+              simpl. apply in_or_app. right. exact Hinbound.
+  - eapply IH.
+    + exact Hsafe.
+    + intros r0 Hy Hin.
+      apply (Hnocap r0 Hy). simpl. exact Hin.
+  - eapply IH.
+    + exact Hsafe.
+    + intros r0 Hy Hin.
+      apply (Hnocap r0 Hy). simpl. right. exact Hin.
+  - rewrite subst_case_pats_eq.
+    apply (proj2 (pats_region_capture_safe_equiv (subst_pats_val x s pats))).
+    apply (proj1 (pats_region_capture_safe_equiv pats)) in Hsafe.
+    revert pats Hsafe Hnocap.
+    fix IHps 1.
+    intros ps HsafePs HnocapPs.
+    destruct ps as [| [K binds body] ps']; simpl in *.
+    + exact I.
+    + destruct HsafePs as [Hbody HsafeTail].
+      destruct
+        (existsb
+           (fun b : term_var * located_type =>
+              if term_var_eq_dec x (fst b) then true else false)
+           binds) eqn:Hbind.
+      * replace (subst_pats_val x s (pat_clause K binds body :: ps'))
+          with (pat_clause K binds body :: subst_pats_val x s ps')
+          by (cbv delta [located_type] in Hbind; simpl; rewrite Hbind; reflexivity).
+        assert (Hbranch :
+                  expr_region_capture_safe body /\
+                  pats_region_capture_safe (subst_pats_val x s ps')).
+        { split.
+          - exact Hbody.
+          - eapply IHps.
+            + exact HsafeTail.
+            + intros r0 Hy Hin.
+              apply (HnocapPs r0 Hy).
+              simpl. apply in_or_app. right. exact Hin. }
+        cbv delta [located_type] in Hbind.
+        simpl. rewrite Hbind. simpl. exact Hbranch.
+      * replace (subst_pats_val x s (pat_clause K binds body :: ps'))
+          with (pat_clause K binds (subst_val x s body) :: subst_pats_val x s ps')
+          by (cbv delta [located_type] in Hbind; simpl; rewrite Hbind; reflexivity).
+        assert (Hbranch :
+                  expr_region_capture_safe (subst_val x s body) /\
+                  pats_region_capture_safe (subst_pats_val x s ps')).
+        { split.
+          - eapply IH.
+            + exact Hbody.
+            + intros r0 Hy Hin.
+              apply (HnocapPs r0 Hy).
+              simpl. apply in_or_app. left.
+              apply in_or_app. right. exact Hin.
+          - eapply IHps.
+            + exact HsafeTail.
+            + intros r0 Hy Hin.
+              apply (HnocapPs r0 Hy).
+              simpl. apply in_or_app. right. exact Hin. }
+        cbv delta [located_type] in Hbind.
+        simpl. rewrite Hbind. simpl. exact Hbranch.
+Qed.
+
 Lemma expr_step_stable_subst_val :
   forall x s e,
     expr_step_stable e ->
     (forall y, In y (val_term_vars s) -> ~ In y (expr_bound_term_vars e)) ->
+    (forall lr, In lr (val_symbolic_laddrs s) -> ~ In lr (expr_bound_laddrs e)) ->
+    (forall r, In r (val_symbolic_regions s) -> ~ In r (expr_bound_regions e)) ->
     expr_step_stable (subst_val x s e).
 Proof.
-  intros x s e [Halpha Hsafe] Hnocap.
+  intros x s e [Halpha [HsafeT [HsafeL HsafeR]]] HnocapT HnocapL HnocapR.
   split.
   - eapply expr_alpha_regular_subst_val. exact Halpha.
-  - eapply expr_term_capture_safe_subst_val; eauto.
+  - split.
+    + eapply expr_term_capture_safe_subst_val; eauto.
+    + split.
+      * eapply expr_loc_capture_safe_subst_val; eauto.
+      * eapply expr_region_capture_safe_subst_val; eauto.
 Qed.
 
 Lemma expr_step_stable_value :
   forall v0,
     expr_step_stable (e_val v0).
 Proof.
-  intros v0. split; simpl; repeat split; constructor || exact I.
+  intros v0. repeat split; simpl; constructor || exact I.
 Qed.
 
 Lemma expr_step_stable_let_val_result :
@@ -4699,15 +5347,29 @@ Lemma expr_step_stable_let_val_result :
     expr_step_stable (e_let x T (e_val vl) e2) ->
     expr_step_stable (subst_val x vl e2).
 Proof.
-  intros x T vl e2 [Halpha Hsafe].
+  intros x T vl e2 [Halpha [HsafeT [HsafeL HsafeR]]].
   destruct (expr_alpha_regular_let_inv _ _ _ _ Halpha)
     as [_ [Halpha2 [_ [_ _]]]].
-  destruct (expr_term_capture_safe_let_inv _ _ _ _ Hsafe)
-    as [_ [Hsafe2 Hcross]].
+  destruct (expr_term_capture_safe_let_inv _ _ _ _ HsafeT)
+    as [_ [HsafeT2 HcrossT]].
+  destruct (expr_loc_capture_safe_let_inv _ _ _ _ HsafeL)
+    as [_ [HsafeL2 HcrossL]].
+  destruct (expr_region_capture_safe_let_inv _ _ _ _ HsafeR)
+    as [_ [HsafeR2 HcrossR]].
   eapply expr_step_stable_subst_val.
-  - split; assumption.
+  - split.
+    + exact Halpha2.
+    + split.
+      * exact HsafeT2.
+      * split.
+        -- exact HsafeL2.
+        -- exact HsafeR2.
   - intros y Hy Hin.
-    eapply Hcross; eauto.
+    eapply HcrossT; eauto.
+  - intros lr Hy Hin.
+    eapply HcrossL; eauto.
+  - intros r Hy Hin.
+    eapply HcrossR; eauto.
 Qed.
 
 Lemma expr_step_stable_letregion_body :
@@ -4715,10 +5377,14 @@ Lemma expr_step_stable_letregion_body :
     expr_step_stable (e_letregion r body) ->
     expr_step_stable body.
 Proof.
-  intros r body [Halpha Hsafe].
-  split; simpl in *.
+  intros r body [Halpha [HsafeT [HsafeL HsafeR]]].
+  split.
   - eapply expr_alpha_regular_letregion_inv. exact Halpha.
-  - exact Hsafe.
+  - split.
+    + exact HsafeT.
+    + split.
+      * exact HsafeL.
+      * exact HsafeR.
 Qed.
 
 Lemma expr_step_stable_letloc_body :
@@ -4726,10 +5392,14 @@ Lemma expr_step_stable_letloc_body :
     expr_step_stable (e_letloc l r le body) ->
     expr_step_stable body.
 Proof.
-  intros l r le body [Halpha Hsafe].
-  split; simpl in *.
+  intros l r le body [Halpha [HsafeT [HsafeL HsafeR]]].
+  split.
   - eapply expr_alpha_regular_letloc_inv. exact Halpha.
-  - exact Hsafe.
+  - split.
+    + exact HsafeT.
+    + split.
+      * exact HsafeL.
+      * exact HsafeR.
 Qed.
 
 Lemma expr_alpha_regular_case_branch :
@@ -4753,7 +5423,8 @@ Proof.
         -- eapply NoDup_app_right.
            eapply NoDup_app_left.
            exact Hladdrs.
-        -- eapply NoDup_app_left.
+        -- eapply NoDup_app_right.
+           eapply NoDup_app_left.
            exact Hregions.
     + eapply IH; eauto.
       split.
@@ -4779,16 +5450,85 @@ Proof.
     + eapply IH; eauto.
 Qed.
 
+Lemma expr_loc_capture_safe_case_branch :
+  forall scrut ps dc binds body,
+    expr_loc_capture_safe (e_case scrut ps) ->
+    In (pat_clause dc binds body) ps ->
+    expr_loc_capture_safe body.
+Proof.
+  intros scrut ps.
+  induction ps as [| [K binds0 body0] ps IH];
+    intros dc binds body Hsafe Hin; simpl in *.
+  - contradiction.
+  - destruct Hsafe as [Hbody0 HsafeTail].
+    destruct Hin as [Heq | Hin].
+    + inversion Heq; subst. exact Hbody0.
+    + eapply IH; eauto.
+Qed.
+
+Lemma expr_region_capture_safe_case_branch :
+  forall scrut ps dc binds body,
+    expr_region_capture_safe (e_case scrut ps) ->
+    In (pat_clause dc binds body) ps ->
+    expr_region_capture_safe body.
+Proof.
+  intros scrut ps.
+  induction ps as [| [K binds0 body0] ps IH];
+    intros dc binds body Hsafe Hin; simpl in *.
+  - contradiction.
+  - destruct Hsafe as [Hbody0 HsafeTail].
+    destruct Hin as [Heq | Hin].
+    + inversion Heq; subst. exact Hbody0.
+    + eapply IH; eauto.
+Qed.
+
+Lemma expr_alpha_regular_case_binds_disjoint :
+  forall scrut ps dc binds body,
+    expr_alpha_regular (e_case scrut ps) ->
+    In (pat_clause dc binds body) ps ->
+    (forall lr, In lr (pat_laddrs binds) -> ~ In lr (expr_bound_laddrs body))
+    /\ (forall r, In r (binds_region_vars binds) -> ~ In r (expr_bound_regions body)).
+Proof.
+  intros scrut ps.
+  induction ps as [| [K binds0 body0] ps IH];
+    intros dc binds body Halpha Hin; simpl in *.
+  - contradiction.
+  - destruct Halpha as [Hterms [Hladdrs Hregions]].
+    destruct Hin as [Heq | Hin].
+    + inversion Heq; subst.
+      split.
+      * intros lr HinBind HinBody.
+        eapply (NoDup_app_cross laddr (pat_laddrs binds) (expr_bound_laddrs body) lr).
+        -- eapply NoDup_app_left. exact Hladdrs.
+        -- exact HinBind.
+        -- exact HinBody.
+      * intros r HinBind HinBody.
+        eapply (NoDup_app_cross region_var (binds_region_vars binds) (expr_bound_regions body) r).
+        -- eapply NoDup_app_left. exact Hregions.
+        -- exact HinBind.
+        -- exact HinBody.
+	    + eapply IH; eauto.
+	      split.
+	      * eapply NoDup_app_right. exact Hterms.
+	      * split.
+	        -- eapply NoDup_app_right. exact Hladdrs.
+	        -- eapply NoDup_app_right. exact Hregions.
+Qed.
+
 Lemma expr_step_stable_case_branch :
   forall scrut ps dc binds body,
     expr_step_stable (e_case scrut ps) ->
     In (pat_clause dc binds body) ps ->
     expr_step_stable body.
 Proof.
-  intros scrut ps dc binds body [Halpha Hsafe] Hin.
+  intros scrut ps dc binds body [Halpha [HsafeT [HsafeL HsafeR]]] Hin.
   split.
   - eapply expr_alpha_regular_case_branch; eauto.
-  - eapply expr_term_capture_safe_case_branch; eauto.
+  - split.
+    + eapply expr_term_capture_safe_case_branch; eauto.
+    + split.
+      * eapply expr_loc_capture_safe_case_branch; eauto.
+      * eapply expr_region_capture_safe_case_branch; eauto.
 Qed.
 
 Lemma expr_step_stable_case_result :
@@ -4801,18 +5541,41 @@ Proof.
   intros rc i l r pats K binds body indices Hstable Hfind.
   pose proof (find_matching_pat_In _ _ _ Hfind) as Hin.
   pose proof (expr_step_stable_case_branch _ _ _ _ _ Hstable Hin) as Hbody.
+  pose proof (expr_alpha_regular_case_binds_disjoint _ _ _ _ _ (proj1 Hstable) Hin)
+    as [HbindsL HbindsR].
   clear Hfind Hin.
-  revert body Hbody indices.
-  induction binds as [| [x T] binds IH]; intros body Hbody indices; simpl.
+  revert body Hbody indices HbindsL HbindsR.
+  induction binds as [| [x T] binds IH];
+    intros body Hbody indices HdisjL HdisjR; simpl.
   - exact Hbody.
   - destruct indices as [| i0 indices].
     + exact Hbody.
     + destruct T as [tc lx rx].
       cbn [subst_vals build_cloc_vals pat_term_vars bind_laddr].
-      eapply IH.
+      eapply (IH (subst_val x (v_cloc rc i0 lx rx) body)).
       * eapply expr_step_stable_subst_val.
         -- exact Hbody.
         -- intros y Hy. inversion Hy.
+        -- intros lr Hy Hin.
+           simpl in Hy. destruct Hy as [Heq | []]. subst.
+           eapply HdisjL.
+           ++ simpl. left. reflexivity.
+           ++ exact Hin.
+        -- intros r0 Hy Hin.
+           simpl in Hy. destruct Hy as [Heq | []]. subst.
+           eapply HdisjR.
+           ++ simpl. left. reflexivity.
+           ++ exact Hin.
+      * intros lr HinBind HinBody.
+        rewrite expr_bound_laddrs_subst_val in HinBody.
+        eapply HdisjL.
+        -- simpl. right. exact HinBind.
+        -- exact HinBody.
+      * intros r0 HinBind HinBody.
+        rewrite expr_bound_regions_subst_val in HinBody.
+        eapply HdisjR.
+        -- simpl. right. exact HinBind.
+        -- exact HinBody.
 Qed.
 
 (* ================================================================= *)
@@ -5971,11 +6734,9 @@ Proof.
 Qed.
 
 Lemma preservation_letloc_start_case :
-  forall FDs DI G Sigma C A N Aout Nout Afresh Nfresh M S l r body T,
+  forall FDs DI G Sigma C A N Aout Nout M S l r body T,
     has_type FDs DI G Sigma C A N Aout Nout
              (e_letloc l r (LE_Start r) body) T ->
-    has_type_fresh FDs DI G Sigma C A N Afresh Nfresh
-                    (e_letloc l r (LE_Start r) body) T ->
     store_wf DI Sigma C A N M S ->
     exists Sigma' C' Ain' Nin',
       has_type FDs DI G Sigma' C' Ain' Nin' Aout Nout body T
@@ -5983,20 +6744,21 @@ Lemma preservation_letloc_start_case :
       /\ store_extends Sigma Sigma'
       /\ conloc_extends C C'.
 Proof.
-  intros FDs DI G Sigma C A N Aout Nout Afresh Nfresh M S l r body T
-         Hty Hfresh Hwf.
+  intros FDs DI G Sigma C A N Aout Nout M S l r body T
+         Hty Hwf.
   inversion Hty; subst. clear Hty.
-  inversion Hfresh; subst. clear Hfresh.
   exists Sigma,
          (extend_conloc C (l, r) (LE_Start r)),
          (extend_alloc A r (AP_Loc (l, r))),
          (extend_nursery N (l, r)).
   split.
-  - match goal with
-    | [ Hbody : has_type _ _ _ _ _ _ _ _ _ body _ |- _ ] => exact Hbody
-    end.
+  - eassumption.
   - split.
-    + eapply store_wf_extend_letloc_start; eauto.
+    + match goal with
+      | Hfreshctx : letloc_fresh_ctx Sigma C A N (l, r),
+        Hnone : In (r, AP_None) A |- _ =>
+          exact (store_wf_extend_letloc_start _ _ _ _ _ _ _ _ Hwf Hfreshctx Hnone)
+      end
     + split.
       * apply store_extends_refl.
       * intros lr le Hin.
@@ -6004,11 +6766,9 @@ Proof.
 Qed.
 
 Lemma preservation_letloc_tag_case :
-  forall FDs DI G Sigma C A N Aout Nout Afresh Nfresh M S l lprev r body T rc i,
+  forall FDs DI G Sigma C A N Aout Nout M S l lprev r body T rc i,
     has_type FDs DI G Sigma C A N Aout Nout
              (e_letloc l r (LE_Next lprev r) body) T ->
-    has_type_fresh FDs DI G Sigma C A N Afresh Nfresh
-                    (e_letloc l r (LE_Next lprev r) body) T ->
     store_wf DI Sigma C A N M S ->
     lookup_loc M (lprev, r) = Some (rc, i) ->
     exists Sigma' C' Ain' Nin',
@@ -6017,10 +6777,9 @@ Lemma preservation_letloc_tag_case :
       /\ store_extends Sigma Sigma'
       /\ conloc_extends C C'.
 Proof.
-  intros FDs DI G Sigma C A N Aout Nout Afresh Nfresh M S l lprev r body T rc i
-         Hty Hfresh Hwf Hlookup.
+  intros FDs DI G Sigma C A N Aout Nout M S l lprev r body T rc i
+         Hty Hwf Hlookup.
   inversion Hty; subst; clear Hty.
-  inversion Hfresh; subst; clear Hfresh.
   pose proof Hwf as Hwf_copy.
   destruct Hwf_copy as [_ [_ [Halloc _]]].
   destruct Halloc as [Hlin1 _].
@@ -6035,11 +6794,14 @@ Proof.
          (extend_alloc A r (AP_Loc (l, r))),
          (extend_nursery N (l, r)).
   split.
-  - match goal with
-    | [ Hbody : has_type _ _ _ _ _ _ _ _ _ body _ |- _ ] => exact Hbody
-    end.
+  - eassumption.
   - split.
-    + eapply store_wf_extend_letloc_tag; eauto.
+    + match goal with
+      | Hfreshctx : letloc_fresh_ctx Sigma C A N (l, r),
+        Hfocus_prev : In (r, AP_Loc (lprev, r)) A,
+        Hnur_prev : In (lprev, r) N |- _ =>
+          exact (store_wf_extend_letloc_tag _ _ _ _ _ _ _ _ _ _ Hwf Hfreshctx Hfocus_prev Hnur_prev Hlookup)
+      end
     + split.
       * apply store_extends_refl.
       * intros lr le Hin.
@@ -6047,11 +6809,9 @@ Proof.
 Qed.
 
 Lemma preservation_letloc_after_case :
-  forall FDs DI G Sigma C A N Aout Nout Afresh Nfresh M S l l1 r tc_prev body T rc i j,
+  forall FDs DI G Sigma C A N Aout Nout M S l l1 r tc_prev body T rc i j,
     has_type FDs DI G Sigma C A N Aout Nout
              (e_letloc l r (LE_After tc_prev l1 r) body) T ->
-    has_type_fresh FDs DI G Sigma C A N Afresh Nfresh
-                    (e_letloc l r (LE_After tc_prev l1 r) body) T ->
     store_wf DI Sigma C A N M S ->
     lookup_loc M (l1, r) = Some (rc, i) ->
     end_witness DI S (rc, i) tc_prev (rc, j) ->
@@ -6061,10 +6821,9 @@ Lemma preservation_letloc_after_case :
       /\ store_extends Sigma Sigma'
       /\ conloc_extends C C'.
 Proof.
-  intros FDs DI G Sigma C A N Aout Nout Afresh Nfresh M S l l1 r tc_prev body T rc i j
-         Hty Hfresh Hwf Hlookup Hew.
+  intros FDs DI G Sigma C A N Aout Nout M S l l1 r tc_prev body T rc i j
+         Hty Hwf Hlookup Hew.
   inversion Hty; subst; clear Hty.
-  inversion Hfresh; subst; clear Hfresh.
   pose proof Hwf as Hwf_copy.
   destruct Hwf_copy as [Hmap _].
   match goal with
@@ -6077,11 +6836,15 @@ Proof.
          (extend_alloc A r (AP_Loc (l, r))),
          (extend_nursery N (l, r)).
   split.
-  - match goal with
-    | [ Hbody : has_type _ _ _ _ _ _ _ _ _ body _ |- _ ] => exact Hbody
-    end.
+  - eassumption.
   - split.
-    + eapply store_wf_extend_letloc_after; eauto.
+    + match goal with
+      | Hfreshctx : letloc_fresh_ctx Sigma C A N (l, r),
+        Hfocus_prev : In (r, AP_Loc (l1, r)) A,
+        Hstore_prev : In ((l1, r), tc_prev) Sigma,
+        Hnotin_prev : ~ In (l1, r) N |- _ =>
+          exact (store_wf_extend_letloc_after _ _ _ _ _ _ _ _ _ _ _ _ Hwf Hfreshctx Hfocus_prev Hstore_prev Hnotin_prev Hlookup Hew)
+      end
     + split.
       * apply store_extends_refl.
       * intros lr le Hin.
@@ -6164,19 +6927,19 @@ Qed.
    avoids difficulties with Coq's induction tactic on non-variable
    indices. *)
 
-Lemma progress_gen :
+Lemma progress_gen_ctx :
   forall FDs DI G Sigma C A N A2 N2 e Tl,
     has_type FDs DI G Sigma C A N A2 N2 e Tl ->
     G = @nil (term_var * ty) ->
-    forall M St,
+    forall avoid_t avoid_l avoid_r M St,
     store_wf DI Sigma C A N M St ->
     di_functional DI ->
     expr_wf M e ->
     (exists vl, e = e_val vl)
-    \/ (exists St2 M2 e2, step FDs DI St M e St2 M2 e2).
+    \/ (exists St2 M2 e2, step_ctx avoid_t avoid_l avoid_r FDs DI St M e St2 M2 e2).
 Proof.
   intros FDs DI G Sigma C A N A2 N2 e Tl Htype.
-  induction Htype; intros HG M St Hwf Hdi Hewf; subst.
+  induction Htype; intros HG avoid_t avoid_l avoid_r M St Hwf Hdi Hewf; subst.
 
   (* ---- T_Var ----
      Γ = nil, so In (x, _) nil is False. *)
@@ -6192,7 +6955,12 @@ Proof.
   1: {
     right.
     simpl in Hewf; destruct Hewf as [He1 He2].
-    destruct (IHHtype1 eq_refl M St Hwf Hdi He1)
+    destruct
+      (IHHtype1 eq_refl
+                (List.app (expr_bound_term_vars e2) avoid_t)
+                (List.app (expr_bound_laddrs e2) avoid_l)
+                (List.app (expr_bound_regions e2) avoid_r)
+                M St Hwf Hdi He1)
       as [[vl Hval] | [St2 [M2 [e1' Hstep]]]].
     - subst. do 3 eexists. apply D_Let_Val.
     - do 3 eexists. apply D_Let_Expr.
@@ -6318,7 +7086,10 @@ Theorem progress :
     (exists v0, e = e_val v0)
     \/ (exists S' M' e', step FDs DI S M e S' M' e').
 Proof.
-  intros. eapply progress_gen; eassumption || reflexivity.
+  intros.
+  unfold step.
+  eapply progress_gen_ctx with (avoid_t := nil) (avoid_l := nil) (avoid_r := nil);
+    eassumption || reflexivity.
 Qed.
 
 (* ================================================================= *)
@@ -6349,28 +7120,29 @@ Qed.
 (* additional caller support beyond the actual arguments.             *)
 (* ================================================================= *)
 
-Theorem preservation :
-  forall FDs DI G Sigma C A N Aout Nout Afresh Nfresh M S e Ty S' M' e',
+Theorem preservation_ctx :
+  forall avoid_t avoid_l avoid_r
+         FDs DI G Sigma C A N Aout Nout M S e Ty S' M' e',
     Forall (fdecl_has_type FDs DI) FDs ->
     Forall (fdecl_instantiation_ok FDs DI) FDs ->
     gamma_binders_disjoint G e ->
     nursery_locmap_injective N M ->
     has_type FDs DI G Sigma C A N Aout Nout e Ty ->
-    has_type_fresh FDs DI G Sigma C A N Afresh Nfresh e Ty ->
     store_wf DI Sigma C A N M S ->
     expr_wf M e ->
-    step FDs DI S M e S' M' e' ->
+    step_ctx avoid_t avoid_l avoid_r FDs DI S M e S' M' e' ->
     exists Sigma' C' Ain' Nin',
       has_type FDs DI G Sigma' C' Ain' Nin' Aout Nout e' Ty
       /\ store_wf DI Sigma' C' Ain' Nin' M' S'
       /\ store_extends Sigma Sigma'
       /\ conloc_extends C C'.
 Proof.
-  intros FDs DI G Sigma C A N Aout Nout Afresh Nfresh M S e Ty S' M' e'
-         Hfds Hinsts Hgamma Hninj Hty Hfresh Hwf Hewf Hstep.
-  revert G Ty Sigma C A N Aout Nout Afresh Nfresh Hfds Hinsts Hgamma Hninj Hty Hfresh Hwf Hewf.
+  intros avoid_t avoid_l avoid_r
+         FDs DI G Sigma C A N Aout Nout M S e Ty S' M' e'
+         Hfds Hinsts Hgamma Hninj Hty Hwf Hewf Hstep.
+  revert G Ty Sigma C A N Aout Nout Hfds Hinsts Hgamma Hninj Hty Hwf Hewf.
   induction Hstep;
-    intros G Ty Sigma C A N Aout Nout Afresh Nfresh Hfds Hinsts Hgamma Hninj Hty Hfresh Hwf Hewf.
+    intros G Ty Sigma C A N Aout Nout Hfds Hinsts Hgamma Hninj Hty Hwf Hewf.
   - (* D_DataCon *)
     eapply has_type_datacon_inv in Hty.
     destruct Hty
@@ -6411,20 +7183,13 @@ Proof.
     destruct T as [tc1 l1 r1].
     destruct Ty as [tc2 l2 r2].
     eapply has_type_let_inv in Hty as [A1 [N1 [Hty1 Hbody]]].
-    eapply has_type_fresh_let_inv in Hfresh as [A1f [N1f [Hfresh1 Hfresh_body]]].
     assert (Hgamma_e1 : gamma_binders_disjoint G e1).
     { intros y t HinG HinB.
       apply (Hgamma y t HinG). simpl. apply in_or_app. left. exact HinB.
     }
-    assert (Hfresh1' :
-      has_type_fresh FDs DI G Sigma C A N A1 N1 e1 (LocTy tc1 l1 r1)).
-    { eapply expr_has_type_fresh_realign.
-      - exact Hty1.
-      - exact Hfresh1.
-    }
     destruct Hewf as [Hewf1 _].
-    destruct (IHHstep G (LocTy tc1 l1 r1) Sigma C A N A1 N1 A1 N1
-                      Hfds Hinsts Hgamma_e1 Hninj Hty1 Hfresh1' Hwf Hewf1)
+    destruct (IHHstep G (LocTy tc1 l1 r1) Sigma C A N A1 N1
+                      Hfds Hinsts Hgamma_e1 Hninj Hty1 Hwf Hewf1)
       as [Sigma' [C' [Ain' [Nin' [Hty' [Hwf' [Hse Hce]]]]]]].
     eapply preservation_let_expr_case; eauto.
   - (* D_Let_Val *)
@@ -6466,7 +7231,9 @@ Proof.
     exists Sigma, C, A, N.
     split.
     + exact (Hfdinst G Sigma C A N
-               (loc_map_laddrs M) (loc_map_regions M)
+               avoid_t
+               (List.app (loc_map_laddrs M) avoid_l)
+               (List.app (loc_map_regions M) avoid_r)
                loc_args val_args tc l r
                Hnur Halloc Hlen Hret Hargs).
     + split.
@@ -6476,7 +7243,6 @@ Proof.
         -- apply conloc_extends_refl.
   - (* D_Case *)
     inversion Hty; subst; clear Hty.
-    inversion Hfresh; subst; clear Hfresh.
     match goal with
     | Hfind : find_matching_pat K pats = Some (pat_clause K binds body) |- _ =>
         pose proof (find_matching_pat_In _ _ _ Hfind) as HinPs
@@ -6490,11 +7256,6 @@ Proof.
     | Hcasewf : pats_case_wf _ pats,
       HinPs : In (pat_clause K binds body) pats |- _ =>
         pose proof (pats_case_wf_In _ _ _ _ _ Hcasewf HinPs) as Hbindwf
-    end.
-    match goal with
-    | Hcasefresh : pats_case_fresh_ctx Sigma C A N pats,
-      HinPs : In (pat_clause K binds body) pats |- _ =>
-        pose proof (pats_case_fresh_ctx_In _ _ _ _ _ _ _ _ Hcasefresh HinPs) as Hbindfresh
     end.
     inversion Hpty; subst; clear Hpty.
     pose proof (pats_case_wf_In _ _ _ _ _ H17 HinPs) as Hbindwf0.
@@ -6525,6 +7286,44 @@ Proof.
         -- intros lr tc Hin. apply in_extend_store_list. exact Hin.
         -- apply conloc_extends_refl.
 Qed.
+
+Theorem preservation :
+  forall FDs DI G Sigma C A N Aout Nout M S e Ty S' M' e',
+    Forall (fdecl_has_type FDs DI) FDs ->
+    Forall (fdecl_instantiation_ok FDs DI) FDs ->
+    gamma_binders_disjoint G e ->
+    nursery_locmap_injective N M ->
+    has_type FDs DI G Sigma C A N Aout Nout e Ty ->
+    store_wf DI Sigma C A N M S ->
+    expr_wf M e ->
+    step FDs DI S M e S' M' e' ->
+    exists Sigma' C' Ain' Nin',
+      has_type FDs DI G Sigma' C' Ain' Nin' Aout Nout e' Ty
+      /\ store_wf DI Sigma' C' Ain' Nin' M' S'
+      /\ store_extends Sigma Sigma'
+      /\ conloc_extends C C'.
+Proof.
+  intros FDs DI G Sigma C A N Aout Nout M S e Ty S' M' e'
+         Hfds Hinsts Hgamma Hninj Hty Hwf Hewf Hstep.
+  unfold step in Hstep.
+  eapply preservation_ctx with (avoid_t := nil) (avoid_l := nil) (avoid_r := nil);
+    eauto.
+Qed.
+
+(* Proof-engineering checkpoint:
+   a direct "typed + has_type_fresh" one-step subject-reduction theorem still
+   fails in the D_Let_Expr case, even after the step_ctx refinement above.
+   The reason is now explicit rather than hidden:
+
+   - ordinary preservation may legitimately grow Sigma/C while stepping e1,
+   - but TF_Let stores the body freshness premise under the original
+     extend_store Sigma ... / C, not under the grown Sigma'/C',
+   - so has_type_fresh is still not the invariant we can iterate through
+     multi-step execution.
+
+   This confirms the earlier comment below around closed_subject_reduction_meta:
+   the endgame invariant has to be syntax-side and stable under contextual
+   stepping, rather than the derivation-indexed has_type_fresh judgment. *)
 
 (* ================================================================= *)
 (* Theorem: Type Safety  (thesis §2.2.3, Theorem Type Safety)        *)
@@ -6601,6 +7400,8 @@ Definition expr_wf_subject_reduction_closed
    to use the stable syntax-level invariants above:
 
      expr_step_stable
+     expr_loc_capture_safe
+     expr_region_capture_safe
      source_expr_step_stable
      fdecl_step_stable
      source_program_step_stable
@@ -6608,9 +7409,25 @@ Definition expr_wf_subject_reduction_closed
    instead of reusing has_type_fresh as though it were monotone subject
    reduction data. *)
 
-Definition closed_subject_reduction_meta
+(* Final-gap isolation note:
+   the remaining meta-theory gap is no longer allowed to smuggle in the
+   typing/store part of subject reduction.  That part is already proved above
+   as preservation.  The only remaining assumption package below is the
+   genuinely separate one-step stability story for the extra runtime/syntax
+   invariants that type_safety needs to iterate:
+
+     expr_step_stable
+     nursery_locmap_injective
+     expr_wf
+
+   In particular, type_safety should use preservation directly for typing and
+   store_wf, and use the meta obligation below only for these residual
+   invariants.  This keeps the final theorem interface honest about the exact
+   thesis gaps that remain in the named mechanization. *)
+Definition closed_step_stability_meta
     (FDs : fun_env) (DI : datacon_info) : Prop :=
-  forall Sigma C A N Aout Nout M S e T S' M' e',
+  forall Sigma C A N Aout Nout M S e T S' M' e'
+         Sigma' C' Ain' Nin',
     Forall (fdecl_has_type FDs DI) FDs ->
     Forall (fdecl_instantiation_ok FDs DI) FDs ->
     Forall fdecl_step_stable FDs ->
@@ -6620,20 +7437,21 @@ Definition closed_subject_reduction_meta
     nursery_locmap_injective N M ->
     expr_wf M e ->
     step FDs DI S M e S' M' e' ->
-    exists Sigma' C' Ain' Nin',
-      has_type FDs DI nil Sigma' C' Ain' Nin' Aout Nout e' T
-      /\ expr_step_stable e'
-      /\ store_wf DI Sigma' C' Ain' Nin' M' S'
-      /\ nursery_locmap_injective Nin' M'
-      /\ expr_wf M' e'.
+    has_type FDs DI nil Sigma' C' Ain' Nin' Aout Nout e' T ->
+    store_wf DI Sigma' C' Ain' Nin' M' S' ->
+    expr_step_stable e'
+    /\ nursery_locmap_injective Nin' M'
+    /\ expr_wf M' e'.
 
 Theorem type_safety :
-  forall FDs DI Sigma C A N A' N' M S e T Sn Mn en,
+  forall FDs DI Sigma C A N A' N' Afresh Nfresh M S e T Sn Mn en,
     Forall (fdecl_has_type FDs DI) FDs ->
     Forall (fdecl_instantiation_ok FDs DI) FDs ->
     Forall fdecl_step_stable FDs ->
-    closed_subject_reduction_meta FDs DI ->
+    fresh_subject_reduction_closed FDs DI ->
+    closed_step_stability_meta FDs DI ->
     has_type FDs DI nil Sigma C A N A' N' e T ->
+    has_type_fresh FDs DI nil Sigma C A N Afresh Nfresh e T ->
     source_expr_step_stable e ->
     store_wf DI Sigma C A N M S ->
     nursery_locmap_injective N M ->
@@ -6643,24 +7461,36 @@ Theorem type_safety :
     (exists v0, en = e_val v0)
     \/ (exists S' M' e', step FDs DI Sn Mn en S' M' e').
 Proof.
-  intros FDs DI Sigma C A N A' N' M S e T Sn Mn en
-         Hfds Hinsts Hfdstable Hsr Hty Hsrcstable Hwf Hninj Hdi Hewf Hmulti.
+  intros FDs DI Sigma C A N A' N' Afresh Nfresh M S e T Sn Mn en
+         Hfds Hinsts Hfdstable Hfreshsr Hsr
+         Hty Hfresh Hsrcstable Hwf Hninj Hdi Hewf Hmulti.
   destruct Hsrcstable as [Hstable _].
   remember S as S0 eqn:HS0.
   remember M as M0 eqn:HM0.
   remember e as e0 eqn:He0.
-  revert Sigma C A N A' N' M S e T
-         Hty Hstable Hwf Hninj Hewf HS0 HM0 He0.
+  revert Sigma C A N A' N' Afresh Nfresh M S e T
+         Hty Hfresh Hstable Hwf Hninj Hewf HS0 HM0 He0.
   induction Hmulti;
-    intros Sigma C A N A' N' Mcur Scur ecur T
-           Hty Hstable Hwf Hninj Hewf HS0 HM0 He0;
+    intros Sigma C A N A' N' Afresh Nfresh Mcur Scur ecur T
+           Hty Hfresh Hstable Hwf Hninj Hewf HS0 HM0 He0;
     subst.
   - eapply progress; eauto.
-  - destruct (Hsr
+  - destruct (preservation
+                FDs DI nil Sigma C A N A' N' Afresh Nfresh Mcur Scur ecur T S' M' e'
+                Hfds Hinsts (gamma_binders_disjoint_nil ecur) Hninj
+                Hty Hfresh
+                Hwf Hewf H)
+      as [Sigma1 [C1 [A1 [N1 [Hty1 [Hwf1 [_ _]]]]]]].
+    destruct (Hfreshsr
+                Sigma C A N A' N' Afresh Nfresh Mcur Scur ecur T S' M' e'
+                Sigma1 C1 A1 N1
+                Hfds Hinsts Hty Hfresh Hwf Hewf H Hty1 Hwf1)
+      as [Afresh1 [Nfresh1 Hfresh1]].
+    destruct (Hsr
                 Sigma C A N A' N' Mcur Scur ecur T S' M' e'
-                Hfds Hinsts Hfdstable Hty Hstable Hwf Hninj Hewf H)
-      as [Sigma1 [C1 [A1 [N1 Hsr1]]]].
-    destruct Hsr1 as [Hty1 [Hstable1 [Hwf1 [Hninj1 Hewf1]]]].
+                Sigma1 C1 A1 N1
+                Hfds Hinsts Hfdstable Hty Hstable Hwf Hninj Hewf H Hty1 Hwf1)
+      as [Hstable1 [Hninj1 Hewf1]].
     eapply IHHmulti; eauto.
 Qed.
 

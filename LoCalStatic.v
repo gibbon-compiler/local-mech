@@ -139,17 +139,20 @@ Definition instantiated_param_type
    support-parameterized variant below matches the refined D_App
    Freshen(FD) story: the caller may ask for freshness not only against
    the actual arguments, but also against additional symbolic support
-   already live in the runtime state.  The zero-support wrapper remains
-   the ordinary caller-instantiation used by the static meta-theory when
-   no extra runtime support needs to be mentioned explicitly. *)
+   already live in the runtime state and, when the named meta-theory is
+   reasoning under a surrounding binder context, against extra term
+   binders as well.  The zero-support wrapper remains the ordinary
+   caller-instantiation used by the static meta-theory when no extra
+   context needs to be mentioned explicitly. *)
 Definition instantiated_fun_body_with_support
+    (avoid_t : list term_var)
     (avoid_l : list laddr)
     (avoid_r : list region_var)
     (formals actuals : list laddr)
     (params : list (term_var * ty))
     (val_args : list val)
     (body : expr) : expr :=
-  subst_app_fresh_with_support avoid_l avoid_r
+  subst_app_fresh_with_support avoid_t avoid_l avoid_r
     formals actuals params val_args body.
 
 Definition instantiated_fun_body
@@ -157,7 +160,7 @@ Definition instantiated_fun_body
     (params : list (term_var * ty))
     (val_args : list val)
     (body : expr) : expr :=
-  instantiated_fun_body_with_support nil nil
+  instantiated_fun_body_with_support nil nil nil
     formals actuals params val_args body.
 
 Definition fresh_region (A : alloc_env) (r : region_var) : Prop :=
@@ -580,15 +583,16 @@ Inductive fdecl_has_type : fun_env -> datacon_info -> fdecl -> Prop :=
    simultaneous location/value instantiation lemma in the D_App proof.
    In the named mechanization we strengthen that meta-level obligation:
    the instantiated body must remain typable even after Freshen(FD) is
-   asked to avoid additional caller support beyond the actual arguments.
-   This keeps the runtime-aware D_App rule honest instead of smuggling
-   its freshness side condition through an unspoken alpha-conversion
+   asked to avoid additional caller support beyond the actual arguments,
+   and when needed additional surrounding term binders as well.  This
+   keeps the runtime-aware D_App rule honest instead of smuggling its
+   freshness side condition through an unspoken alpha-conversion
    argument. *)
 Definition fdecl_instantiation_ok
     (FDs : fun_env) (DI : datacon_info) (fd : fdecl) : Prop :=
   match fd with
   | FunDecl _ locs named_args out _ body =>
-      forall G Sigma C A N avoid_l avoid_r lrs vs tc l r,
+      forall G Sigma C A N avoid_t avoid_l avoid_r lrs vs tc l r,
         In (l, r) N ->
         In (r, AP_Loc (l, r)) A ->
         List.length lrs = List.length locs ->
@@ -597,7 +601,7 @@ Definition fdecl_instantiation_ok
         has_type FDs DI G Sigma C A N
                  A (remove_nursery N (l, r))
                  (instantiated_fun_body_with_support
-                    avoid_l avoid_r locs lrs named_args vs body)
+                    avoid_t avoid_l avoid_r locs lrs named_args vs body)
                  (LocTy tc l r)
   end.
 

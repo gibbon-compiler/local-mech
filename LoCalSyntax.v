@@ -403,7 +403,12 @@ with expr_bound_laddrs (e : expr) : list laddr :=
 
 Fixpoint pat_bound_regions (p : pat) : list region_var :=
   match p with
-  | pat_clause _ _ body => expr_bound_regions body
+  (* Named-mechanization refinement:
+     pattern bindings introduce symbolic regions through their located types,
+     just like they introduce symbolic locations through pat_laddrs.  We count
+     those regions as binders here so the alpha-regularity / no-capture
+     invariants line up with case-substitution in the safety proof. *)
+  | pat_clause _ binds body => List.map bind_region_var binds ++ expr_bound_regions body
   end
 
 with expr_bound_regions (e : expr) : list region_var :=
